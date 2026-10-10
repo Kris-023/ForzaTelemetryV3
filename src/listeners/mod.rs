@@ -2,6 +2,7 @@ pub mod backfire;
 pub mod calib;
 pub mod dsg;
 pub mod hud;
+pub mod houses;
 pub mod lap_trace;
 pub mod notify;
 pub mod perf_test;

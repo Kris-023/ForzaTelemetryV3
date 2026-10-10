@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::config::{app_data_dir, AppConfig, GearboxMode};
-use crate::listeners::hud::{hud_paused, ModeClassifier};
+use crate::listeners::hud::{hud_paused, ModeClassifier, PauseRule};
 use crate::overlay::snapshot::HudMode;
 use crate::input::{char_to_key, InputSender};
 use crate::listeners::calib::{CalibChecks, EngageChecks};
@@ -177,10 +177,11 @@ impl DsgListener {
         input: &InputSender,
         dynamic_max_rpm: f32,
         suppress_accel: bool,
+        pause: PauseRule,
     ) {
         // Race vs drift, shared with the HUD (`listeners/hud.rs`). Fed before the paused early-out
         // so its window restarts on a pause instead of measuring it.
-        self.hud_mode = self.drift.update(pkt.current_lap, pkt.timestamp_ms, !hud_paused(pkt, cfg.experimental_pause_detection));
+        self.hud_mode = self.drift.update(pkt.current_lap, pkt.timestamp_ms, !hud_paused(pkt, pause));
         let in_drift = self.hud_mode == HudMode::Drift;
 
         if pkt.is_race_on == 0 {

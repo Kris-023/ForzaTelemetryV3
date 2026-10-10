@@ -689,8 +689,8 @@ fn de(s: &str) -> Option<&'static str> {
         "Boost / pressure" => "Ladedruck / Druck",
         "FPS limit" => "FPS-Limit",
         "Experimental pause detection" => "Experimentelle Pausenerkennung",
-        "Detects the garage and menus by a level, motionless car with the handbrake fully on. May miss a garage view where the car is rotated."
-            => "Erkennt Garage und Menüs an einem waagerechten, stillstehenden Auto mit voll angezogener Handbremse. Kann eine Garagenansicht mit gedrehtem Auto übersehen.",
+        "Detects your garage: the car is within 25 m of one of your houses with the handbrake fully on and first gear selected. Needs the map data (Game Install)."
+            => "Erkennt deine Garage: Das Auto ist höchstens 25 m von einem deiner Häuser entfernt, die Handbremse ist voll angezogen und der erste Gang eingelegt. Braucht die Kartendaten (Spielinstallation).",
         "Always on top" => "Immer im Vordergrund",
 
         // ── Settings: Hotkeys ──────────────────────────────────────────
@@ -901,7 +901,9 @@ fn de(s: &str) -> Option<&'static str> {
         "Race off (is_race_on = 0)" => "Rennen aus (is_race_on = 0)",
         "No max RPM (engine_max_rpm <= 0)" => "Keine Max-Drehzahl (engine_max_rpm <= 0)",
         "Zero attitude (yaw = pitch = roll = 0)" => "Nulllage (Yaw = Pitch = Roll = 0)",
-        "Garage rule (level + handbrake 255 + standing still)" => "Garagen-Regel (waagerecht + Handbremse 255 + Stillstand)",
+        "Garage rule (house within 25 m + handbrake 255 + gear 1)" => "Garagen-Regel (Haus innerhalb 25 m + Handbremse 255 + 1. Gang)",
+        "Nearest house" => "Nächstes Haus",
+        "none (map data not loaded)" => "keins (Kartendaten nicht geladen)",
         "Paused" => "Pausiert",
         "Pause reason" => "Pausengrund",
         "In race (race position set)" => "Im Rennen (Rennposition gesetzt)",

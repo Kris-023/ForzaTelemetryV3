@@ -182,7 +182,7 @@ pub fn show(ui: &mut Ui, app: &mut ForzaApp) {
                     });
                 });
                 crate::theme::checkbox_row(ui, &mut app.config.experimental_pause_detection, tr("Experimental pause detection"))
-                    .on_hover_text(tr("Detects the garage and menus by a level, motionless car with the handbrake fully on. May miss a garage view where the car is rotated."));
+                    .on_hover_text(tr("Detects your garage: the car is within 25 m of one of your houses with the handbrake fully on and first gear selected. Needs the map data (Game Install)."));
             });
 
             crate::theme::card(right, tr("Game Install"), |ui| game_install_card(ui, app));

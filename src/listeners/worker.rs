@@ -52,7 +52,8 @@ use crate::input::InputSender;
 use crate::listeners::backfire::{BackfireListener, BackfireView};
 use crate::listeners::calib::next_max_rpm;
 use crate::listeners::dsg::{DsgListener, DsgView};
-use crate::listeners::hud::{hud_paused, HudTracker, VisFacts};
+use crate::listeners::houses::{House, HousePoller};
+use crate::listeners::hud::{hud_paused, HudTracker, PauseRule, VisFacts};
 use crate::listeners::notify::Notifier;
 use crate::overlay::snapshot::{hud_clock, HudSink};
 use crate::packet::ForzaPacket;
@@ -367,6 +368,10 @@ fn run(ctx: Ctx) {
     let mut in_race = false;
     // The car on the last packet while the game is running and not paused (Calibration started).
     let mut driving_car: Option<i32> = None;
+    // Player-house positions for the experimental pause rule (D103): refreshed at most once a
+    // second and only while the setting is on, borrowed by every per-packet pause check.
+    let mut houses_poller = HousePoller::default();
+    let mut houses: Arc<[House]> = Arc::from([]);
     // Co-Op: (class, PI) of the last race-on packet, restored into paused packets.
     let mut coop_car = (-1, 0);
     // Navigation (`nav`): progress / off-route / re-route per packet, here and not in the UI
@@ -483,6 +488,8 @@ fn run(ctx: Ctx) {
         // A message queued above (reset hotkey / command) goes out at once instead of after
         // the idle wait, packet or no packet.
         let poll = if notifier.has_fresh() { Duration::from_millis(1) } else { IDLE_POLL };
+        houses_poller.tick(cfg.experimental_pause_detection, Instant::now(), &mut houses);
+        let pause = PauseRule { experimental: cfg.experimental_pause_detection, houses: &houses };
         let mut got_packet = false;
         let mut nav_sample = None;
         match udp.recv_timeout(poll) {
@@ -491,7 +498,7 @@ fn run(ctx: Ctx) {
                 // Tracked whenever the overlay is enabled, attached or not, so a lap
                 // started before the overlay came up still has its trace.
                 if cfg.overlay.enabled {
-                    hud.on_packet(&pkt, &cfg.overlay, cfg.experimental_pause_detection, hud_clock());
+                    hud.on_packet(&pkt, &cfg.overlay, pause, hud_clock());
                 }
                 pps.on_packet(Instant::now());
 
@@ -499,7 +506,7 @@ fn run(ctx: Ctx) {
                     in_race = pkt.race_position != 0;
                 }
                 // Same pause rule as the HUD (includes race-on).
-                driving_car = (!hud_paused(&pkt, cfg.experimental_pause_detection) && pkt.car_ordinal != 0)
+                driving_car = (!hud_paused(&pkt, pause) && pkt.car_ordinal != 0)
                     .then_some(pkt.car_ordinal);
                 let nav_now = Instant::now();
                 let dt_ms = nav_prev_pkt.map_or(0, |t| nav_now.duration_since(t).as_millis().min(NAV_DT_CAP_MS) as u32);
@@ -546,7 +553,7 @@ fn run(ctx: Ctx) {
                 // packet lands. See `backfire::echo_grace`.
                 let suppress_gearbox_accel =
                     cfg.dsg_ignore_backfire_accel && input.synthetic_active(Duration::ZERO);
-                dsg.update(&pkt, &cfg, &input, dynamic_max_rpm, suppress_gearbox_accel);
+                dsg.update(&pkt, &cfg, &input, dynamic_max_rpm, suppress_gearbox_accel, pause);
 
                 // Opt-in: keep the in-memory per-car calibration current; written to its own
                 // file on car change and on exit.

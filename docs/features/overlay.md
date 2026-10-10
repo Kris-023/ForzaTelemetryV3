@@ -567,7 +567,7 @@ else to see it).
 | `Calibration done: N rpm` | `notif_calibration` | the gearbox engaging (`DsgListener::engaged` false to true: first manual upshift or a restored profile) |
 
 **Calibration started rule** (`Notifier::watch`, level not edge). Announced when the game is
-running and not paused (`driving`: `!hud_paused(pkt, experimental_pause_detection)`, which
+running and not paused (`driving`: `!hud_paused(pkt, pause)` with the experimental flag and the house list, which
 includes race-on, and a non-zero car ordinal; `worker.rs:driving_car`) and the car is not
 calibrated (`!engaged`), **once per episode** (`Notifier::started_for` = the car it was told
 for). A new episode starts on: a car change (different ordinal), the box becoming calibrated
@@ -715,23 +715,37 @@ visible = enabled && !hud_hidden && (!focus_only || game_focused)
   ```
 
   Plus, when **Setup → Network → "Experimental pause detection"** is on (`experimental_pause_detection`,
-  default on, D29), `garage_paused(pkt)` (also in `hud.rs`, pure, returns which sub-check
-  matched for the Debug tab): `|yaw|, |pitch|, |roll| < 0.01` **and** `hand_brake == 255` **and**
-  all linear velocity components `< 0.01`. Angular velocity is **not** checked. `hud_paused(pkt, experimental)` takes
-  the flag as a parameter; the HUD tracker (`on_packet` / `snapshot`) and the gearbox's drift
-  classifier (`dsg.rs`) pass `AppConfig::experimental_pause_detection`.
-  - *Why:* user report: the HUD stayed visible in the garage, because garage packets keep
-    `is_race_on = 1` and a normal max rpm. The captured garage packet is level (yaw -0.008),
-    handbrake 255, every velocity/acceleration/wheel speed 0, rpm = idle.
-  - *Why no angular-velocity check:* angular velocity jumps when you accelerate while standing
-    still and when grabbing/rotating the car in the garage, so requiring it ~0 wrongly blocked
-    the garage match.
-  - *Why the linear-velocity guard and no extra debounce:* the guard stops a car held by the
-    handbrake while level and rolling from matching; a one-packet match is already ridden
-    out by the HUD's 0.3 s pause delay, so `garage_paused` is stateless.
-  - *Limitation:* yaw is about 0 only when the garage view keeps the car's default
-    orientation; a rotated garage view is **missed** (the car then looks like a normal
-    parked one). A car parked on a slope with the handbrake on isn't matched (pitch > 0.01).
+  default on, D103), `garage_paused(pkt, houses)` (also in `hud.rs`, pure, returns the house
+  and the distance): the car is within **25 m (3D)** of a player-house marker
+  (`PoiKind::House`, `GARAGE_RANGE_M`) **and** `hand_brake == 255` **and** `gear == 1`. Nothing
+  else is checked (not attitude, not velocity). This replaced D29's rule (`|yaw|, |pitch|,
+  |roll| < 0.01` + handbrake 255 + all linear velocity `< 0.01`).
+  - *Why (user, 2026-10-10):* "Redo the pause check, to check wether the car is within a
+    certain range of a house. The handbrake being at '255' and the gear being at '1'", and
+    "25meter should be fine". Garage packets keep `is_race_on = 1` and a normal max rpm, so the
+    other terms miss the garage; D29's attitude/velocity guess missed a rotated garage view and
+    a car on the turntable, while the position of the car does not depend on either.
+  - *Why 25 m, 3D:* the one captured sample (car at -3761.010 / 481.438 / -2952.392 in the
+    garage of the house "Futurist", marker at -3770.1 / 481.0 / -2953.2) is **9.1 m** from its
+    marker (the markers sit at garage height, so 2D and 3D agree); the 8 houses on the island
+    are at least 1.7 km apart, so 25 m can match at most one house and leaves margin for other
+    garages. Only `House` is used: `Estate` / `EstateEntrance` cluster 0.4 m apart and the
+    `FastTravel` "player_house_*" markers sit 100 m below the garage.
+  - *Where the houses come from:* the map layers' POIs (`maprender::store::layers()`, process-wide).
+    The listener thread never calls that per packet: `listeners/houses.rs:HousePoller` asks at
+    most once a second, only while the setting is on (so with it off nothing is loaded for this),
+    copies the 8 `House`s only when the `PoiLayer` pointer changed, and keeps them in an
+    `Arc<[House]>` (also published for the Debug tab, `houses::current()`). A `PauseRule { experimental,
+    houses }` value is passed to every `hud_paused` caller (`HudTracker::on_packet` stores the
+    result for the snapshot, the gearbox's drift classifier in `dsg.rs`, `worker.rs:driving_car`,
+    the Debug tab) so they all agree.
+  - *Fail closed:* no game install, map data still loading or no houses → empty list → the rule
+    never fires, so the HUD cannot hide by mistake. The first ~70 ms after start-up (release)
+    the garage is therefore not detected.
+  - *Why no extra debounce:* a one-packet match is already ridden out by the HUD's 0.3 s pause
+    delay, so `garage_paused` is stateless.
+  - *Side effect:* parked on the handbrake in first gear within 25 m of a house (outside the
+    garage, in front of the house) also reads as paused. Accepted by the user's rule.
   The same fact drives `paused_since`, `HudSnapshot::paused`, the drift/race classifier's
   pause handling and the drift window stop. HUD only; the gearbox and backfire keep their
   own `is_race_on` rules.
