@@ -1269,76 +1269,54 @@ fn controller_card(ui: &mut Ui, app: &mut ForzaApp) {
 /// The "Window Detection" category: detection method + what it gates (hotkeys, the
 /// in-game overlay, synthetic input).
 fn input_card(ui: &mut Ui, app: &mut ForzaApp) {
-    use crate::config::GateMode;
     let mut changed = false;
 
-    control_row(ui, tr("Active if"), |ui| {
-        egui::ComboBox::from_id_salt("hk_gate_mode")
-            .selected_text(match app.config.hotkeys.gate_mode {
-                GateMode::TelemetryLive => tr("Telemetry live"),
-                GateMode::WindowFocus => tr("Game window focused"),
-            })
-            .width(ui.available_width())
-            .show_ui(ui, |ui| {
-                changed |= ui.selectable_value(&mut app.config.hotkeys.gate_mode, GateMode::TelemetryLive, tr("Telemetry live")).changed();
-                changed |= ui.selectable_value(&mut app.config.hotkeys.gate_mode, GateMode::WindowFocus, tr("Game window focused")).changed();
+    // D101: global hotkeys (and controller buttons) fire only while the detector says the
+    // game window is focused, so the method / title rows are always shown — a user stuck on
+    // "Game window not focused" must be able to reach them. (The old "Active if: Telemetry
+    // live / Game window focused" choice is gone: Telemetry live could not exclude a third app.)
+    #[cfg(target_os = "linux")]
+    {
+        use crate::config::FocusMethod;
+        focus_method_row(ui, app, &mut changed);
+        if app.config.hotkeys.focus_method == FocusMethod::Gnome {
+            control_row(ui, tr("Active window"), |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(tr("Test")).clicked() {
+                        app.focus_preview = app.focus.query_now().unwrap_or_else(|e| format!("error: {e}"));
+                    }
+                });
             });
-    });
-
-    // The method / title rows matter whenever anything consults the detector, not only
-    // for hotkey gating. The enabled overlay counts too: its monitor detection needs the
-    // detector to match the game window, so a user stuck on "Game window not focused"
-    // must be able to reach the title / method.
-    let uses_focus = app.config.hotkeys.gate_mode == GateMode::WindowFocus
-        || app.config.hotkeys.input_focus_gate
-        || app.config.overlay.focus_only
-        || app.config.overlay.enabled;
-    if uses_focus {
-        #[cfg(target_os = "linux")]
-        {
-            use crate::config::FocusMethod;
-            focus_method_row(ui, app, &mut changed);
-            if app.config.hotkeys.focus_method == FocusMethod::Gnome {
-                control_row(ui, tr("Active window"), |ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(tr("Test")).clicked() {
-                            app.focus_preview = app.focus.query_now().unwrap_or_else(|e| format!("error: {e}"));
-                        }
-                    });
-                });
-                if !app.focus_preview.is_empty() {
-                    result_line(ui, &format!("\u{2192} {}", app.focus_preview));
-                }
-            }
-            if app.config.hotkeys.focus_method == FocusMethod::Custom {
-                control_row(ui, tr("Command"), |ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(tr("Test")).clicked() {
-                            app.focus_preview = app.focus.query_now().unwrap_or_else(|e| format!("error: {e}"));
-                        }
-                        changed |= ui.add(egui::TextEdit::singleline(&mut app.config.hotkeys.custom_cmd).desired_width(ui.available_width())).changed();
-                    });
-                });
-                if !app.focus_preview.is_empty() {
-                    result_line(ui, &format!("\u{2192} {}", app.focus_preview));
-                }
+            if !app.focus_preview.is_empty() {
+                result_line(ui, &format!("\u{2192} {}", app.focus_preview));
             }
         }
-
-        game_title_row(ui, app, &mut changed);
+        if app.config.hotkeys.focus_method == FocusMethod::Custom {
+            control_row(ui, tr("Command"), |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(tr("Test")).clicked() {
+                        app.focus_preview = app.focus.query_now().unwrap_or_else(|e| format!("error: {e}"));
+                    }
+                    changed |= ui.add(egui::TextEdit::singleline(&mut app.config.hotkeys.custom_cmd).desired_width(ui.available_width())).changed();
+                });
+            });
+            if !app.focus_preview.is_empty() {
+                result_line(ui, &format!("\u{2192} {}", app.focus_preview));
+            }
+        }
     }
 
-    // Poll rate for window detection (drives both hotkey gating and the input gate).
+    game_title_row(ui, app, &mut changed);
+
+    // Poll rate for window detection (drives hotkey gating, the input gate and the overlay).
     changed |= crate::theme::slider_row(ui, tr("Focus check rate"), &mut app.config.hotkeys.focus_poll_hz, 1.0..=20.0, 1.0, 0, " Hz").changed();
 
-    // Live game-window status light (last entry). The detector polls whenever
-    // window-focus gating or the input gate is on.
-    // (Mirrors `focus_params` in app.rs: the overlay runs the detector too.)
-    let detector_active = uses_focus || app.config.overlay.enabled;
-    if detector_active {
+    // Live game-window status light (last entry). The detector polls whenever a global hotkey
+    // is bound, the input gate is on or the overlay is (`focus_params` in app.rs); Idle = none.
+    if app.focus.status() != crate::focus::FocusStatus::Idle {
         if app.focus.status() == crate::focus::FocusStatus::QueryFailed {
             status_dot(ui, Dot::Bad, tr("Focus detection failed — check the method/command"));
-        } else if app.focus.focused() {
+        } else if app.focus.hotkeys_ok() {
             status_dot(ui, Dot::Ok, tr("Game window focused"));
         } else {
             status_dot(ui, Dot::Warn, tr("Game window not focused"));
@@ -1382,7 +1360,7 @@ fn focus_method_row(ui: &mut Ui, app: &mut ForzaApp, changed: &mut bool) {
 /// "Game Window Title" row: the match text plus the 3 s **Detect** countdown (the capture
 /// itself runs in `ForzaApp::update`).
 fn game_title_row(ui: &mut Ui, app: &mut ForzaApp, changed: &mut bool) {
-    control_row(ui, tr("Game Window Title"), |ui| {
+    control_row_tip(ui, tr("Game Window Title"), tr("Hotkeys and controller buttons that act on the game only work while this window is in front. Detect fills the title in from the window you click into."), |ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let label = match app.detect_until {
                 Some(t) => {

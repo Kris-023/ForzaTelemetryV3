@@ -81,17 +81,20 @@ The **Window Detection** card (formerly **Input**; its duplicate "Window Detecti
 sub-heading is gone) holds the focus detection that several features share:
 
 - **Detection method default**: a fresh config picks it from the desktop (`config::focus_method_for_desktop`, fed by `XDG_CURRENT_DESKTOP` / `XDG_SESSION_TYPE` / `HYPRLAND_INSTANCE_SIGNATURE`): Hyprland -> Hyprland, GNOME (incl. `ubuntu:GNOME`) -> GNOME, other X11 session -> X11, unknown Wayland compositor -> Hyprland. Saved configs keep their stored value; a saved `hotkeys` object missing the field gets plain Hyprland (serde default), not detection. *Why:* since overlay + focus-only became default-on, a GNOME user's fresh install ran `hyprctl`, failed, and broke focus gating. The overlay's monitor method (`monitor_method`) still defaults to Hyprland (no GNOME monitor method exists).
-- **Active if** (hotkey gate: Telemetry live / Game window focused); the detection method
-  and game window title (with **Detect**), shown when window focus gates something (Active
-  if = Game window focused, the input gate, the overlay's focus-only option, or the overlay
-  being enabled); and the
-  **Focus check rate**. *Why the enabled overlay counts:* its monitor detection only trusts
-  the focused monitor once the detector matches FH6, so a user stuck on amber *Game window
-  not focused* must be able to see and fix the method / title.
+- The detection method and game window title (with **Detect**), always shown, and the
+  **Focus check rate**. *Why always (D101):* global hotkeys and controller buttons fire only
+  while the detector says the game window is focused, so a user stuck on amber *Game window
+  not focused* must always be able to see and fix the method / title. The **Active if**
+  dropdown (Telemetry live / Game window focused) is gone: hotkeys always use the window
+  detection now ([[hotkeys]]). The *Game Window Title* label has a tooltip saying hotkeys and
+  controller buttons only work while that window is in front (no under-option text, D21);
+  the first-run guide's Window Detection step says the same in its intro.
 - A status dot with three states: green *Game window focused*, **amber** *Game window not
-  focused* (a normal waiting state, not an error), red *Focus detection failed*. It shows
-  while the detector runs (including whenever the overlay is enabled). The colours are the
-  theme's `GOOD` / `WARN` / `DANGER` tokens.
+  focused* (a normal waiting state, not an error; also shown while this app's own window is in
+  front, since that is not the game for hotkeys), red *Focus detection failed* (hotkeys then
+  work everywhere, fail-open). It shows while the detector runs (a global hotkey / pad binding
+  exists, the input gate or the overlay is on). The colours are the theme's `GOOD` / `WARN` /
+  `DANGER` tokens.
 - **Overlay → Only when game window is focused** (`overlay.focus_only`) is **not** here any
   more: it lives on the Overlay tab (General card), with a tooltip saying it uses this card's
   detection method. *Why:* the user looked for it on the Overlay tab and didn't find it in

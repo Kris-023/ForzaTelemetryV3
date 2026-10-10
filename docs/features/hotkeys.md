@@ -9,7 +9,8 @@ feeds the same action channel and gate: see [[gamepad]].
 
 ## Two scopes
 
-- **Global (while in-game)** — fire while the *game* holds focus (or our app does).
+- **Global (while in-game)** — fire only while the *game window* holds focus (D101, see
+  "Gate rules"). Not while our own window or a third app is in front.
   Defaults: `G` = toggle Automatic Gearbox, `F` = **Clear RPM calibration**, `F` =
   **Clear gear map** (same key: one press clears both, see "One key, several actions"),
   `B` = toggle Backfire, `J` = **Hide HUD** (toggle the in-game overlay, see [[overlay]]).
@@ -105,10 +106,18 @@ backend immediately — never stored, sent, or logged.
 
 ## Focus detection (`src/focus.rs`)
 
-One `FocusDetector` + one poll thread (at the configured Hz) caches "is the game focused?"
-in an `AtomicBool`, read by the hotkey gate, the input gate and the overlay's
-**Only when game window is focused** option. The detector also runs whenever the overlay is
-enabled, and its thread does the overlay's monitor detection (see [[overlay]]).
+One `FocusDetector` + one poll thread (at the configured Hz, default 4 Hz = a query every
+250 ms, plus the query's own run time; range 1-20) caches "is the game focused?" in an
+`AtomicBool`, read by the hotkey gate, the input gate and the overlay's
+**Only when game window is focused** option. The detector runs whenever a **global
+hotkey or an enabled controller binding exists** (`app::focus_params`, D101: that is the
+default, so practically always), the input gate is on, or the overlay is enabled; its
+thread also does the overlay's monitor detection (see [[overlay]]). It idles (and reports
+focused, fail-open) only when nothing global is bound. Cost: one short external process per
+poll on Linux (`hyprctl` / `xdotool` / `gdbus`, a few ms to tens of ms), one
+`GetForegroundWindow` call on Windows. The thread queries immediately when it starts, so the
+first answer is there right after launch (until then the cache reads focused, fail-open); a
+settings change that turns it on is picked up within 250 ms.
 
 - **Methods:** Hyprland (`hyprctl activewindow`), X11 (`xdotool`/`xprop`), GNOME (`gdbus`
   → the **Window Calls** Shell extension's `List()`, since GNOME on Wayland has no built-in
@@ -117,17 +126,50 @@ enabled, and its thread does the overlay's monitor detection (see [[overlay]]).
   window's name; `game_match` (case-insensitive substring, default "Forza") decides.
 - **Detect button:** 3-second countdown, then one query auto-fills `game_match` — handles
   opaque titles (e.g. GameScope).
-- **Fail-open:** if a query errors (tool missing, bad command), the detector reports
-  focused=true so hotkeys/input keep working, and the settings shows a red status. A
-  *successful* answer that doesn't match `game_match` is **not** an error: focused=false, hotkeys
-  (in *Game window focused* mode) and gated input are dropped.
+- **Fail-open:** if a query errors (tool missing, bad command, empty Custom command,
+  unsupported platform), the detector reports focused=true so hotkeys/input keep working, and
+  the settings shows a red status. *Why (D101):* otherwise a user on a compositor with no
+  working method would lose their hotkeys entirely. A *successful* answer that doesn't match
+  `game_match` is **not** an error: focused=false, hotkeys and gated input are dropped.
+  The pure step is `focus::evaluate` -> `Verdict`.
+- **Our own window is not the game (D101).** The default `game_match` "Forza" is a substring
+  of our window title "Forza Telemetry V3", so with the plain match our own window would read
+  as the game and global hotkeys would still fire while this app is in front. `Verdict` therefore
+  also carries `own_window` (the active window's name contains "Forza Telemetry"), and
+  `Verdict::hotkeys_ok()` = `focused && !own_window`, cached as `FocusDetector::hotkeys_ok()`.
+  Only the hotkey gate (and Setup's status light) use it: the overlay's `focus_only`, the
+  monitor detection and the input gate keep reading `focused()`, which still counts our own
+  window (so the HUD stays visible while you configure it). *Why not exclude it there too:*
+  the HUD's focus semantics are out of scope for the hotkey change.
 
 ## Gate rules
 
-- **Global hotkeys fire** when our app is focused (unless a text field is capturing keys,
-  via `wants_keyboard_input`) **or** the game is focused; a third app focused → ignored.
-  "Game focused" comes from either *Telemetry-live* (`telemetry.is_connected`, lightweight,
-  can't exclude a third app when auto-pause is off) or *Window-focus* (the detector).
+- **Global hotkeys (and controller buttons) fire only while the game window is focused**
+  (D101), as the focus detector sees it (`FocusDetector::hotkeys_ok`, above): our own app in
+  front -> dropped; a third app in front -> dropped; telemetry being live counts for nothing.
+  *Why:* the user: "Hotkeys should only be recognized, when the game window is active". The old
+  rule fired in our own window too, and its default "Telemetry live" game-focus signal could not
+  exclude a third app while packets still flowed. The old **Active if** setting
+  (`hotkeys.gate_mode`: Telemetry live / Game window focused) became meaningless and was
+  **removed** from the code and the UI; an old config that still has the key loads fine (serde
+  ignores unknown fields) and drops it on the next save. Not repurposed: the detector is the
+  only source of "game focused" now. The one fact left from our side is a text field of ours
+  capturing keys (`our_focused && wants_text` closes the gate), the safety net for a detector
+  that can't tell our window from the game's (e.g. a Custom command / odd `game_match`).
+  The gate is `app::global_hotkey_allowed(our_focused, wants_text, game_focused)` =
+  `game_focused && !(our_focused && wants_text)`, fed with `FocusDetector::hotkeys_ok()`.
+  **In-app** hotkeys (`Ctrl+S`, `Ctrl+E`) are unchanged: egui input, our window only.
+  Truth table (detector state × our app × text field; telemetry live is ignored):
+
+  | detector says | our app focused | text field | fires |
+  |---|---|---|---|
+  | game | no | - | yes |
+  | game (match hits) | yes (can't happen with the default match, see "Our own window") | no | yes |
+  | game | yes | typing | no |
+  | our own window | yes | any | no |
+  | other app | any | any | no |
+  | query error / unsupported / Idle (fail-open) | any | not typing | yes |
+  | query error | yes | typing | no |
 - **Synthetic-input gate** (opt-in, `input_focus_gate`): when on, backfire/DSG key injection
   is suppressed unless the game is focused, so alt-tabbing out never sprays keys elsewhere.
   The flag is driven from the listener thread — driving it from the frame loop froze it at
@@ -136,10 +178,11 @@ enabled, and its thread does the overlay's monitor detection (see [[overlay]]).
   pushes both to the listener thread each frame — and they **expire after 1 s**
   (`worker::FOCUS_FACTS_TTL`), after which the listener treats the window as neither focused
   nor typing. *Why the expiry:* a hidden window is never drawn, so the pushed values freeze.
-  Frozen at *focused, not typing* the gate is stuck **open** — a bare `G`/`B`/`F` typed into
-  any other app would toggle the gearbox or wipe your calibration. Frozen at *focused,
-  typing* it is stuck **shut** for as long as the window stays hidden. Expired, the gate
-  falls back to "is the game focused?", which is the correct rule for a hidden window. 1 s is
+  Frozen at *focused, typing* the gate would be stuck **shut** for as long as the window stays
+  hidden. Expired, the gate is "is the game focused?", which is the correct rule for a hidden
+  window. (Before D101 a frozen *focused, not typing* also held the gate stuck **open**, so a
+  bare `G`/`B`/`F` typed into any other app toggled the gearbox; "our app focused" no longer
+  opens the gate, but the expiry is still needed for the typing fact.) 1 s is
   ~5× the slowest frame the UI can legitimately take (the FPS-limit slider floors at 5 fps
   and `update` always re-arms a repaint).
 
@@ -246,11 +289,12 @@ enabled, and its thread does the overlay's monitor detection (see [[overlay]]).
   moment the node was opened. *Why:* a node first classified wrong (a sysfs hiccup, or the
   "no plain keyboard yet" fallback) would otherwise skew the light for the whole session.
   A reader thread that ends logs `hotkeys: reader for … ended: …` to stderr (never silent).
-  **Gate facts for GNOME:** with the default *Telemetry live* mode the window query isn't used for
-  hotkeys at all (only packets in the last 2 s, or our own window focused); in *Game window
-  focused* mode a **successful but non-matching** answer blocks hotkeys (fail-open covers only
-  query *errors*), so a wrong `game_match` (e.g. the Proton window's title/class lacks
-  "Forza") drops them silently.
+  **Gate facts for GNOME:** global hotkeys always use the window query (D101); a **successful but
+  non-matching** answer blocks them (fail-open covers only query *errors*), so a wrong
+  `game_match` (e.g. the Proton window's title/class lacks "Forza") drops them silently. Where
+  detection is unreliable (a compositor with no working method, or titles that never contain the
+  match) set **Custom** with a command, or use **Detect**; with a failing query the hotkeys work
+  everywhere (fail-open) and Setup shows the red status.
   **Live status (v0.4.2 follow-up).** `ui::settings::refresh_input_facts()` runs from
   `ForzaApp::update` every frame, throttled to once per ~2 s (plus at once on **Re-check**): it
   re-reads `input_probe` (sysfs reads, `open()` of **every** event node, the

@@ -25,11 +25,14 @@ use crate::minimap::{
 use crate::packet::ForzaPacket;
 use crate::telemetry::TelemetryState;
 
-/// Whether a global hotkey should fire. Fires when our app is focused (unless a
-/// text field is capturing keys), or when our app is not focused but the game is.
-/// A third app focused → ignore. See the global-hotkeys spec §7.
+/// Whether a global hotkey should fire (D101): only while the game window is focused, as the
+/// window-focus detector sees it (`FocusDetector::hotkeys_ok`: fail-open when detection
+/// can't answer, and our own window never counts as the game). Our app being in front, or
+/// telemetry being live, does not open the gate. The one thing that still closes it from our
+/// side: a text field of ours capturing keys (`our_focused && wants_text`), for the case
+/// where the detector can't tell our window from the game's. See `docs/features/hotkeys.md`.
 pub(crate) fn global_hotkey_allowed(our_focused: bool, wants_text: bool, game_focused: bool) -> bool {
-    if our_focused { !wants_text } else { game_focused }
+    game_focused && !(our_focused && wants_text)
 }
 
 /// The global-scope bindings the capture backend should match against.
@@ -700,9 +703,15 @@ fn overlay_thread_error(e: String) -> DisabledReason {
     if cfg!(target_os = "windows") { DisabledReason::Win32(e) } else { DisabledReason::Wayland(e) }
 }
 
-/// The focus detector's params. It runs for the hotkey/input gates, and whenever the
-/// overlay is on: its `focus_only` (D5) and its monitor detection (D18) need a real
-/// answer, and an idle detector fails open (always "focused").
+/// Whether anything can fire a global action: a keyboard binding or an enabled pad binding.
+fn has_global_binding(cfg: &AppConfig) -> bool {
+    !global_bindings(cfg).is_empty() || (cfg.gamepad.enabled && !cfg.gamepad.bindings.is_empty())
+}
+
+/// The focus detector's params. It runs whenever a global hotkey / pad binding exists (D101:
+/// they fire only with the game focused), for the input gate, and whenever the overlay is on:
+/// its `focus_only` (D5) and its monitor detection (D18) need a real answer. An idle
+/// detector fails open (always "focused"), so it must not idle while hotkeys are bound.
 fn focus_params(cfg: &AppConfig) -> FocusParams {
     let o = &cfg.overlay;
     FocusParams {
@@ -710,9 +719,7 @@ fn focus_params(cfg: &AppConfig) -> FocusParams {
         custom_cmd: cfg.hotkeys.custom_cmd.clone(),
         game_match: cfg.hotkeys.game_match.clone(),
         poll_hz: cfg.hotkeys.focus_poll_hz,
-        enabled: cfg.hotkeys.input_focus_gate
-            || cfg.hotkeys.gate_mode == crate::config::GateMode::WindowFocus
-            || o.enabled,
+        enabled: cfg.hotkeys.input_focus_gate || o.enabled || has_global_binding(cfg),
         monitor: (cfg!(any(target_os = "linux", target_os = "windows")) && o.enabled).then(|| MonitorParams {
             method: o.monitor_method,
             cmd: o.monitor_cmd.clone(),
@@ -2879,22 +2886,71 @@ mod tests {
 
 #[cfg(test)]
 mod hotkey_tests {
-    use super::global_hotkey_allowed;
+    use super::{focus_params, global_hotkey_allowed};
+    use crate::config::{AppConfig, HotkeyAction};
+    use crate::focus::evaluate;
+
+    /// The whole global gate as the listener thread runs it: one detector query result,
+    /// the UI facts, and (ignored since D101) whether telemetry is live.
+    fn fires(query: Result<&str, &str>, our_focused: bool, wants_text: bool, _telemetry_live: bool) -> bool {
+        let v = evaluate(&query.map(String::from).map_err(String::from), "Forza");
+        global_hotkey_allowed(our_focused, wants_text, v.hotkeys_ok())
+    }
 
     #[test]
-    fn fires_when_app_focused_and_not_typing() {
-        assert!(global_hotkey_allowed(true, false, false));
+    fn game_focused_fires() {
+        assert!(fires(Ok("steam_app_1 Forza Horizon 6"), false, false, true));
+        assert!(fires(Ok("steam_app_1 Forza Horizon 6"), false, false, false));
     }
     #[test]
-    fn blocked_when_app_focused_but_typing() {
-        assert!(!global_hotkey_allowed(true, true, false));
+    fn our_app_focused_does_not_fire_global() {
+        // Our title contains the default match "Forza", but it is not the game.
+        assert!(!fires(Ok("Forza Telemetry V3"), true, false, true));
+        // A detector that does not match us either way.
+        assert!(!fires(Ok("kitty"), true, false, true));
     }
     #[test]
-    fn fires_when_not_ours_but_game_focused() {
-        assert!(global_hotkey_allowed(false, false, true));
+    fn telemetry_live_with_third_app_focused_does_not_fire() {
+        assert!(!fires(Ok("firefox Mozilla Firefox"), false, false, true));
     }
     #[test]
-    fn blocked_when_third_app_focused() {
-        assert!(!global_hotkey_allowed(false, false, false));
+    fn detector_error_fails_open() {
+        assert!(fires(Err("hyprctl: not found"), false, false, false));
+        assert!(fires(Err("unsupported platform"), true, false, false));
+        assert!(fires(Err("empty custom command"), false, false, true));
+    }
+    #[test]
+    fn text_field_capture_still_blocks() {
+        assert!(!fires(Ok("Forza Horizon 6"), true, true, false));
+        assert!(!fires(Err("x"), true, true, false));
+        // A stale "typing" fact without our window focused cannot block the game.
+        assert!(global_hotkey_allowed(false, true, true));
+    }
+    #[test]
+    fn in_app_scope_is_not_global() {
+        use crate::config::HotkeyScope;
+        assert_eq!(HotkeyAction::MiniSettings.scope(), HotkeyScope::AppFocused);
+        assert_eq!(HotkeyAction::DashboardEdit.scope(), HotkeyScope::AppFocused);
+        assert_eq!(HotkeyAction::ToggleGearbox.scope(), HotkeyScope::Global);
+    }
+    #[test]
+    fn detector_runs_while_global_hotkeys_are_bound() {
+        let mut cfg = AppConfig::default();
+        cfg.overlay.enabled = false;
+        cfg.hotkeys.input_focus_gate = false;
+        assert!(focus_params(&cfg).enabled, "default bindings -> detector on");
+        cfg.hotkeys.bindings.retain(|a, _| a.scope() == crate::config::HotkeyScope::AppFocused);
+        cfg.gamepad.enabled = false;
+        assert!(!focus_params(&cfg).enabled, "nothing global to gate -> idle");
+        cfg.gamepad.enabled = true;
+        assert!(focus_params(&cfg).enabled, "a pad binding is a global action too");
+    }
+    #[test]
+    fn old_config_with_gate_mode_still_loads() {
+        let hk: crate::config::HotkeyConfig =
+            serde_json::from_str(r#"{"gate_mode":"WindowFocus","game_match":"Forza","focus_poll_hz":4.0}"#).unwrap();
+        assert_eq!(hk.game_match, "Forza");
+        let hk: crate::config::HotkeyConfig = serde_json::from_str(r#"{"gate_mode":"TelemetryLive"}"#).unwrap();
+        assert!(!hk.bindings.is_empty());
     }
 }

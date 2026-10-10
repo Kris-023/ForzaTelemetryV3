@@ -26,7 +26,7 @@ Controller** (card right under Hotkey). Code: `src/gamepad.rs`; UI: `controller_
 - **Actions reuse the keyboard hotkey channel.** `Gamepad::spawn` is handed
   `HotkeyListener::action_sender()` (a clone of the `mpsc::Sender<HotkeyAction>` the listener
   thread drains), so a pad press passes through the *same* focus gate (`global_hotkey_allowed`,
-  `GateMode`) as a key, with no edit to `listeners/worker.rs`. *Why:* one gate, one place for
+  fed by the focus detector, D101) as a key, with no edit to `listeners/worker.rs`. *Why:* one gate, one place for
   the "game focused" rule; the pad cannot drift from the keyboard behaviour.
 - **Pure core.** `norm_stick`/`norm_trigger` (absinfo range -> -1..1 / 0..1),
   `radial_deadzone`, `trigger_deadzone`, and `Processor` (held set + rising edges) have no

@@ -209,8 +209,7 @@ pub fn garage_paused(pkt: &ForzaPacket) -> Option<GarageMatch> {
 /// Paused this long (s) → hidden. Short enough to clear the screen promptly on the pause
 /// menu, long enough to ride out a one-packet `is_race_on` blip (research §6).
 pub const PAUSE_HIDE_SECS: f64 = 0.3;
-/// No packet for this long (s) → hidden and `connected = false`. Same 2 s as the
-/// listener's `STALE_AFTER` for the TelemetryLive hotkey gate.
+/// No packet for this long (s) → hidden and `connected = false`.
 pub const NO_PACKET_HIDE_SECS: f64 = 2.0;
 
 /// Facts the visibility target is computed from.
