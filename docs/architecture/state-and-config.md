@@ -105,7 +105,7 @@ Clear gear map keys) default to the user's own values rather than neutral ones. 
 user asked that their current setup be what an unconfigured install gets. Per-machine and
 personal values are deliberately **not** copied: `fh6_install_dir`, `input_perm_dont_remind`
 (also in `EXPORT_EXCLUDE`), the overlay's monitor settings, window-detection settings
-(`hotkeys.gate_mode`, `focus_method`, `game_match`, ...), co-op identity (name, colour, room,
+(`hotkeys.focus_method`, `game_match`, ...), co-op identity (name, colour, room,
 last code), window geometry, port, profile selection. The per-feature docs list each value
 ([[overlay]], [[hotkeys]], [[gamepad]], [[backfire]], [[coop]]).
 

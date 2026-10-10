@@ -43,7 +43,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::config::{
-    load_car_calibrations, save_car_calibrations, AppConfig, CarCalibration, GateMode,
+    load_car_calibrations, save_car_calibrations, AppConfig, CarCalibration,
     HotkeyAction,
 };
 use crate::coop::CoopReader;
@@ -61,14 +61,13 @@ use crate::packet::ForzaPacket;
 /// granularity at which the HUD notices a lost stream (hidden 2.0–2.2 s after the last
 /// packet) or a focus change while no packets arrive.
 const IDLE_POLL: Duration = Duration::from_millis(200);
-/// No packet for this long ⇒ telemetry isn't live (the `TelemetryLive` hotkey gate).
-const STALE_AFTER: Duration = Duration::from_secs(2);
 /// How long a pushed [`ToListener::our_focused`] / `wants_text` stays believable.
 ///
 /// They only change when the UI is drawn, and a hidden window is never drawn — so without
-/// an expiry they would freeze at whatever the last visible frame said, and the global
-/// hotkey gate would be stuck open (bare `G`/`B`/`F` typed in *any* other app would toggle
-/// the gearbox or wipe the calibration) or stuck shut (if a text field had focus). After
+/// an expiry they would freeze at whatever the last visible frame said: a frozen `wants_text`
+/// would keep the global hotkey gate shut for as long as the window stays hidden (before D101
+/// a frozen "focused" also held it open, so bare `G`/`B`/`F` typed in *any* other app
+/// toggled the gearbox; the gate now needs the game focused either way). After
 /// this long with no push we treat the window as neither focused nor typing, which is what
 /// a hidden window actually is; the gate then falls back to "is the game focused?".
 ///
@@ -355,7 +354,6 @@ fn run(ctx: Ctx) {
     // shows it too, via `ListenerView::pps`). It lives here, not on the UI thread, because the
     // UI drains in batches whenever a frame stalls, which made a UI-side count swing.
     let mut pps = PpsMeter::new(Instant::now());
-    let mut last_packet: Option<Instant> = None;
     // HUD overlay: per-packet derived state, the attached mailbox, the Hide HUD toggle, and
     // the last published visibility (a change without a packet still has to be published).
     let mut hud = HudTracker::new();
@@ -438,12 +436,8 @@ fn run(ctx: Ctx) {
         // Here rather than in the frame loop: an auto-shifter the user can't switch off
         // while the window is hidden would be worse than one that stops.
         while let Ok(action) = hotkeys.try_recv() {
-            let game_focused = match cfg.hotkeys.gate_mode {
-                GateMode::TelemetryLive => {
-                    last_packet.map(|t| t.elapsed() < STALE_AFTER).unwrap_or(false)
-                }
-                GateMode::WindowFocus => focus.focused(),
-            };
+            // D101: only the focused game window (the detector; fail-open on a query error).
+            let game_focused = focus.hotkeys_ok();
             // Stale focus facts mean the UI hasn't been drawn for a while — i.e. the window
             // is hidden, so it is neither focused nor typing. See FOCUS_FACTS_TTL.
             let fresh = last_push.map(|t| t.elapsed() < FOCUS_FACTS_TTL).unwrap_or(false);
@@ -499,7 +493,6 @@ fn run(ctx: Ctx) {
                 if cfg.overlay.enabled {
                     hud.on_packet(&pkt, &cfg.overlay, cfg.experimental_pause_detection, hud_clock());
                 }
-                last_packet = Some(Instant::now());
                 pps.on_packet(Instant::now());
 
                 if pkt.is_race_on != 0 {

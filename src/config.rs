@@ -145,15 +145,7 @@ impl HotkeyAction {
     }
 }
 
-/// How global hotkeys decide the game is focused.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
-pub enum GateMode {
-    #[default]
-    TelemetryLive,
-    WindowFocus,
-}
-
-/// Which active-window query the WindowFocus gate uses (Linux). Windows always
+/// Which active-window query the focus detector uses (Linux). Windows always
 /// uses GetForegroundWindow and ignores this.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum FocusMethod {
@@ -199,8 +191,9 @@ pub fn detect_focus_method() -> FocusMethod {
 pub struct HotkeyConfig {
     #[serde(default = "default_bindings")]
     pub bindings: HashMap<HotkeyAction, crate::keymap::HotkeyBinding>,
-    #[serde(default)]
-    pub gate_mode: GateMode,
+    // D101: the former `gate_mode` ("Active if": Telemetry live / Game window focused) is gone —
+    // global hotkeys always need the focused game window. Old configs that still carry the key
+    // load fine (serde ignores unknown fields) and it is dropped on the next save.
     #[serde(default)]
     pub focus_method: FocusMethod,
     #[serde(default)]
@@ -271,7 +264,6 @@ impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
             bindings: default_bindings(),
-            gate_mode: GateMode::default(),
             focus_method: detect_focus_method(),
             custom_cmd: String::new(),
             game_match: default_game_match(),
@@ -1945,7 +1937,6 @@ impl AppConfig {
         self.active_profile = name.clone();
         #[cfg(windows)]
         {
-            self.hotkeys.gate_mode = GateMode::WindowFocus;
             self.hotkeys.input_focus_gate = true;
         }
         self.save(); // writes profiles/<name>.json from the current live settings

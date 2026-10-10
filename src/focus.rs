@@ -1,7 +1,7 @@
 //! Shared "is the game the focused window?" detector. One poll thread updates a
-//! cached AtomicBool at the configured rate; the hotkey gate and the synthetic-
-//! input gate both read it. Fail-open: if a query errors, we report focused=true
-//! and surface a red status, so the feature never silently blocks. See spec.
+//! cached AtomicBool at the configured rate; the global-hotkey gate (D101), the synthetic-
+//! input gate and the overlay's focus option all read it. Fail-open: if a query errors, we
+//! report focused=true and surface a red status, so the feature never silently blocks.
 //!
 //! The same thread also runs the HUD overlay's **monitor detection** (D18) while the
 //! overlay is on: it takes the monitor only while the game is the focused window and
@@ -22,6 +22,45 @@ pub enum FocusStatus { Ok = 0, ToolMissing = 1, QueryFailed = 2, Idle = 3 }
 /// Case-insensitive substring match; an empty needle never matches.
 pub fn window_matches(active: &str, needle: &str) -> bool {
     !needle.is_empty() && active.to_lowercase().contains(&needle.to_lowercase())
+}
+
+/// The title of our own window (`main.rs`). The default `game_match` ("Forza") is a substring
+/// of it, so our own window would read as "the game" — [`Verdict::own_window`] tells them apart.
+const OWN_WINDOW_TITLE: &str = "Forza Telemetry";
+
+/// What one active-window query means (the poll thread's step, pure so it is unit-tested).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Verdict {
+    /// The cached "game focused?" — **fail-open**: true on a query error.
+    pub focused: bool,
+    /// The active window is this app's own (its title matches the game text too by default).
+    pub own_window: bool,
+    pub status: FocusStatus,
+    /// A real answer, not the fail-open one: `focused` for a successful query (monitor detection needs this).
+    pub confirmed: bool,
+}
+
+impl Verdict {
+    /// Whether a **global hotkey** may fire (D101): only while the game window is focused —
+    /// not while our own window is in front, not while a third app is. A failed query
+    /// (tool missing, bad command, unsupported platform) stays fail-open, so hotkeys keep
+    /// working where detection can't.
+    pub fn hotkeys_ok(&self) -> bool {
+        self.focused && !self.own_window
+    }
+}
+
+/// One query result → its [`Verdict`]. An `Err` is fail-open (`focused`, red status); a
+/// successful answer that is not the game is **not** an error (`focused = false`).
+pub fn evaluate(res: &Result<String, String>, game_match: &str) -> Verdict {
+    match res {
+        Ok(name) => {
+            let own_window = window_matches(name, OWN_WINDOW_TITLE);
+            let focused = window_matches(name, game_match);
+            Verdict { focused, own_window, status: FocusStatus::Ok, confirmed: focused }
+        }
+        Err(_) => Verdict { focused: true, own_window: false, status: FocusStatus::QueryFailed, confirmed: false },
+    }
 }
 
 /// Settings the poll thread reads each tick (cheap clone via Arc<Mutex>).
@@ -78,6 +117,7 @@ struct MonitorShared {
 /// Cached detector state shared with consumers.
 pub struct FocusDetector {
     focused: Arc<AtomicBool>,
+    hotkeys_ok: Arc<AtomicBool>,
     status: Arc<AtomicU8>,
     params: Arc<Mutex<FocusParams>>,
     monitor: Arc<Mutex<MonitorShared>>,
@@ -86,6 +126,7 @@ pub struct FocusDetector {
 impl FocusDetector {
     pub fn new(params: FocusParams) -> Self {
         let focused = Arc::new(AtomicBool::new(true)); // fail-open default
+        let hotkeys_ok = Arc::new(AtomicBool::new(true)); // fail-open default
         let status = Arc::new(AtomicU8::new(FocusStatus::Idle as u8));
         let params = Arc::new(Mutex::new(params));
         let monitor = Arc::new(Mutex::new(MonitorShared {
@@ -97,16 +138,22 @@ impl FocusDetector {
         }));
         let d = FocusDetector {
             focused: focused.clone(),
+            hotkeys_ok: hotkeys_ok.clone(),
             status: status.clone(),
             params: params.clone(),
             monitor: monitor.clone(),
         };
-        thread::spawn(move || poll_loop(focused, status, params, monitor));
+        thread::spawn(move || poll_loop(focused, hotkeys_ok, status, params, monitor));
         d
     }
 
     /// Latest cached "game focused?" (fail-open true when disabled/erroring).
     pub fn focused(&self) -> bool { self.focused.load(Ordering::Relaxed) }
+    /// Whether a global hotkey may fire right now (D101, [`Verdict::hotkeys_ok`]): the game
+    /// window is focused and it is not our own window. Fail-open like [`focused`](Self::focused).
+    pub fn hotkeys_ok(&self) -> bool {
+        self.hotkeys_ok.load(Ordering::Relaxed)
+    }
     pub fn status(&self) -> FocusStatus {
         match self.status.load(Ordering::Relaxed) {
             0 => FocusStatus::Ok, 1 => FocusStatus::ToolMissing,
@@ -155,6 +202,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 fn poll_loop(
     focused: Arc<AtomicBool>,
+    hotkeys_ok: Arc<AtomicBool>,
     status: Arc<AtomicU8>,
     params: Arc<Mutex<FocusParams>>,
     monitor: Arc<Mutex<MonitorShared>>,
@@ -163,6 +211,7 @@ fn poll_loop(
         let p = params.lock().unwrap().clone();
         if !p.enabled {
             focused.store(true, Ordering::Relaxed);
+            hotkeys_ok.store(true, Ordering::Relaxed);
             status.store(FocusStatus::Idle as u8, Ordering::Relaxed);
             monitor_idle(&monitor);
             thread::sleep(Duration::from_millis(250));
@@ -170,20 +219,11 @@ fn poll_loop(
         }
         // The real answer, not the fail-open one: monitor detection must only act on a
         // confirmed "the game is focused".
-        let game_focused = match query_active_window(p.method, &p.custom_cmd) {
-            Ok(name) => {
-                let m = window_matches(&name, &p.game_match);
-                focused.store(m, Ordering::Relaxed);
-                status.store(FocusStatus::Ok as u8, Ordering::Relaxed);
-                m
-            }
-            Err(_) => {
-                // Fail-open: allow input/hotkeys, but flag the failure.
-                focused.store(true, Ordering::Relaxed);
-                status.store(FocusStatus::QueryFailed as u8, Ordering::Relaxed);
-                false
-            }
-        };
+        let v = evaluate(&query_active_window(p.method, &p.custom_cmd), &p.game_match);
+        hotkeys_ok.store(v.hotkeys_ok(), Ordering::Relaxed);
+        focused.store(v.focused, Ordering::Relaxed);
+        status.store(v.status as u8, Ordering::Relaxed);
+        let game_focused = v.confirmed;
         match &p.monitor {
             Some(m) => monitor_tick(&monitor, m, game_focused),
             None => monitor_idle(&monitor),
@@ -429,6 +469,44 @@ mod tests {
         assert!(window_matches("Forza Horizon 6", "forza"));
         assert!(window_matches("gamescope[123]: Forza", "Forza"));
         assert!(!window_matches("Firefox", "Forza"));
+    }
+
+    fn ok(name: &str) -> Result<String, String> { Ok(name.to_string()) }
+
+    #[test]
+    fn verdict_game_focused_fires_hotkeys() {
+        let v = evaluate(&ok("steam_app_1 Forza Horizon 6"), "Forza");
+        assert!(v.focused && v.confirmed && v.hotkeys_ok());
+        assert_eq!(v.status, FocusStatus::Ok);
+    }
+
+    #[test]
+    fn verdict_third_app_drops_hotkeys() {
+        let v = evaluate(&ok("firefox Mozilla Firefox"), "Forza");
+        assert!(!v.focused && !v.confirmed && !v.hotkeys_ok());
+        assert_eq!(v.status, FocusStatus::Ok, "a successful non-game answer is not an error");
+    }
+
+    #[test]
+    fn verdict_own_window_drops_hotkeys_despite_default_match() {
+        // Our title contains "Forza": it matches the game text, but must not count as the game.
+        for name in ["Forza Telemetry V3", "Forza Telemetry V3 Forza Telemetry V3"] {
+            let v = evaluate(&ok(name), "Forza");
+            assert!(v.focused, "still 'focused' for the overlay's own option");
+            assert!(v.own_window && !v.hotkeys_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn verdict_query_error_fails_open() {
+        let v = evaluate(&Err("hyprctl: not found".into()), "Forza");
+        assert!(v.focused && v.hotkeys_ok() && !v.confirmed);
+        assert_eq!(v.status, FocusStatus::QueryFailed);
+    }
+
+    #[test]
+    fn verdict_empty_match_never_fires() {
+        assert!(!evaluate(&ok("Forza Horizon 6"), "").hotkeys_ok());
     }
 
     #[test]
