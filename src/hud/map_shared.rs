@@ -135,6 +135,10 @@ pub struct Remote {
     /// terrain. Flat and tilted views ignore it.
     pub y: Option<f32>,
     pub yaw: f32,
+    /// The telemetry pitch / roll (a paused one: its last known), radians. Used by the 3D view
+    /// only when the map's Car orientation option is on (D100).
+    pub pitch: f32,
+    pub roll: f32,
     pub colour: Color32,
     pub paused: bool,
 }
@@ -262,16 +266,18 @@ fn remote_colour(r: &Remote) -> Color32 {
 /// the own car's) per teammate that [`draw_remotes_in`] would draw as an arrow on the map, i.e. the
 /// ones inside the bounds; the others have the edge pointer only. At the telemetry position,
 /// height and yaw (a teammate without a height stands on the terrain), in their colour (grey while
-/// paused). Empty for a flat / tilted camera. Hand the result to `MarkerScene::mates`, and draw the
+/// paused). With `orient` (the map's Car orientation option, D100) also at their pitch and roll
+/// (a paused one: the last known), else yaw only. Empty for a flat / tilted camera. Hand the result to `MarkerScene::mates`, and draw the
 /// labels with `draw_remotes_in(.., flat_body = false)`.
-pub fn remote_markers_3d(cv: &MapCanvas, remotes: &[Remote], kind: crate::maprender::cfg::MarkerStyle, round: bool) -> Vec<Marker3d> {
+pub fn remote_markers_3d(cv: &MapCanvas, remotes: &[Remote], kind: crate::maprender::cfg::MarkerStyle, orient: bool, round: bool) -> Vec<Marker3d> {
     let Some(rel) = cv.cam.relief.as_ref() else { return Vec::new() };
     remotes
         .iter()
         .filter(|r| cv.within(cv.to_screen_at(r.x, r.z, r.y), 8.0 * cv.s, round))
         .map(|r| {
             let y = r.y.filter(|y| y.is_finite()).unwrap_or_else(|| rel.terrain.height(r.x, r.z) + GROUND_BELOW_M);
-            Marker3d { pos: [r.x, y, r.z], yaw: r.yaw, kind, colour: remote_colour(r) }
+            let (pitch, roll) = if orient { (r.pitch, r.roll) } else { (0.0, 0.0) };
+            Marker3d { pos: [r.x, y, r.z], yaw: r.yaw, pitch, roll, kind, colour: remote_colour(r) }
         })
         .collect()
 }
@@ -545,7 +551,7 @@ mod tests {
         let car = (hx + 150.0, hz - 150.0);
         let cam3 = Camera::new(car.0, car.1, -0.78, 600.0, rect, Camera::tilt_centre(rect, 0.85), 55f32.to_radians(), 200.0)
             .with_relief(Relief::new(terrain.clone(), 1.0, terrain.height(car.0, car.1)));
-        let mate = |y: Option<f32>| Remote { id: "kai".into(), name: "Kai".into(), x: hx, z: hz, y, yaw: 0.0, colour: Color32::from_rgb(255, 128, 0), paused: false };
+        let mate = |y: Option<f32>| Remote { id: "kai".into(), name: "Kai".into(), x: hx, z: hz, y, yaw: 0.0, pitch: 0.0, roll: 0.0, colour: Color32::from_rgb(255, 128, 0), paused: false };
         let arrow_centre = |cam: &Camera, y: Option<f32>| -> Pos2 {
             let shapes = with_canvas(cam, rect, false, |cv| draw_remotes(cv, &[mate(y)], car, 0.0, true));
             let poly = shapes.iter().find_map(|s| if let egui::Shape::Path(p) = &s.shape { Some(p.points.clone()) } else { None }).expect("teammate arrow");
@@ -570,15 +576,26 @@ mod tests {
         // height, not the hill's - heading its yaw, in its colour, of the map's Car marker kind, and
         // the egui side draws no arrow (the name stays).
         use crate::maprender::cfg::MarkerStyle;
-        let markers = |cam: &Camera, mates: &[Remote]| -> Vec<Marker3d> {
+        let markers_o = |cam: &Camera, mates: &[Remote], orient: bool| -> Vec<Marker3d> {
             let mut out = Vec::new();
-            with_canvas(cam, rect, false, |cv| out = remote_markers_3d(cv, mates, MarkerStyle::Sedan, false));
+            with_canvas(cam, rect, false, |cv| out = remote_markers_3d(cv, mates, MarkerStyle::Sedan, orient, false));
             out
         };
+        let markers = |cam: &Camera, mates: &[Remote]| markers_o(cam, mates, false);
         let mut kai = mate(Some(tunnel_y));
         kai.yaw = 1.25;
+        kai.pitch = -0.2;
+        kai.roll = 0.3;
         let m = markers(&cam3, std::slice::from_ref(&kai));
-        assert_eq!(m, vec![Marker3d { pos: [hx, tunnel_y, hz], yaw: 1.25, kind: MarkerStyle::Sedan, colour: Color32::from_rgb(255, 128, 0) }]);
+        // Car orientation off (D100): yaw only, pitch and roll left out.
+        assert_eq!(m, vec![Marker3d { pos: [hx, tunnel_y, hz], yaw: 1.25, pitch: 0.0, roll: 0.0, kind: MarkerStyle::Sedan, colour: Color32::from_rgb(255, 128, 0) }]);
+        // On: the teammate's own pitch and roll too (a paused one carries its last known ones).
+        let m = markers_o(&cam3, std::slice::from_ref(&kai), true);
+        assert_eq!((m[0].yaw, m[0].pitch, m[0].roll), (1.25, -0.2, 0.3));
+        let mut kai_paused = kai.clone();
+        kai_paused.paused = true;
+        let m = markers_o(&cam3, &[kai_paused], true);
+        assert_eq!((m[0].pitch, m[0].roll), (-0.2, 0.3));
         // No height: standing on the terrain. Paused: grey, like the flat arrow.
         let m = markers(&cam3, &[mate(None)]);
         assert!((m[0].pos[1] - (top + GROUND_BELOW_M)).abs() < 1e-3, "{:?}", m[0].pos);

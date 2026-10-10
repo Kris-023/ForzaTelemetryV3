@@ -90,6 +90,8 @@ use crate::nav::{NavLine, NavProgress};
 use scene::{Frame, Gl3d, NavFrame, RaceFrame};
 
 pub use marker::{Marker3d, Trail3d, TrailSeg, GROUND_BELOW_M};
+#[cfg(test)]
+pub(crate) use marker::attitude_for_up;
 pub use probe::Caps;
 pub use scene::RenderStats;
 

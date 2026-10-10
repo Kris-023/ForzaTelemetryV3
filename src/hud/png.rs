@@ -134,6 +134,8 @@ fn coop_mates_on(snap: &HudSnapshot, height: &dyn Fn(f32, f32) -> f32) -> CoopLa
         z,
         y: Some(height(x, z)),
         yaw: yaw + dyaw,
+        pitch: 0.0,
+        roll: 0.0,
         name: name.into(),
         colour: crate::ui::coop::hue_color(hue),
         paused: false,
@@ -1132,6 +1134,14 @@ fn ink_from_bg(img: &ColorImage) -> u64 {
     img.pixels.iter().map(|c| [c.r(), c.g(), c.b()].iter().zip(bg).map(|(a, b)| a.abs_diff(b) as u64).sum::<u64>()).sum()
 }
 
+/// The pitch and roll a car heading `yaw` reports parked on `terrain` at `(x, z)`: parallel to the ground.
+fn slope_attitude(terrain: &Terrain, (x, z): (f32, f32), yaw: f32) -> (f32, f32) {
+    let l = 3.0;
+    let (gx, gz) = ((terrain.height(x + l, z) - terrain.height(x - l, z)) / (2.0 * l), (terrain.height(x, z + l) - terrain.height(x, z - l)) / (2.0 * l));
+    let n = (gx * gx + 1.0 + gz * gz).sqrt();
+    crate::maprender::gl3d::attitude_for_up(yaw, [-gx / n, 1.0 / n, -gz / n])
+}
+
 fn differing(a: &ColorImage, b: &ColorImage) -> usize {
     a.pixels.iter().zip(&b.pixels).filter(|(p, q)| p != q).count()
 }
@@ -1188,6 +1198,27 @@ fn render_3d_states() -> Result<(), String> {
     let mates = coop_mates_on(&hills, &|x, z| terrain.height(x, z));
     let sedan = |c: &mut OverlayConfig| c.map_layers.tilt.relief.marker = crate::maprender::cfg::MarkerStyle::Sedan;
     let hills_sedan = on_hills(cfg_3d(sedan));
+    // D100: the same views with Car orientation on - the own car and the teammates sit parallel to
+    // the hill's slope (a teammate as well: their packets carry pitch and roll too).
+    let orient_sedan = |c: &mut OverlayConfig| {
+        sedan(c);
+        c.map_layers.tilt.relief.car_orientation = true;
+    };
+    let orient_arrow = |c: &mut OverlayConfig| c.map_layers.tilt.relief.car_orientation = true;
+    let (hp, hr) = slope_attitude(&terrain, (-120.0, -40.0), hill_yaw);
+    println!("  hill slope attitude at the car: pitch {:.1} deg, roll {:.1} deg", hp.to_degrees(), hr.to_degrees());
+    let with_attitude = |mut s: HudSnapshot| {
+        s.pkt.pitch = hp;
+        s.pkt.roll = hr;
+        s
+    };
+    let hills_sedan_orient = with_attitude(on_hills(cfg_3d(orient_sedan)));
+    let hills_arrow_orient = with_attitude(on_hills(cfg_3d(orient_arrow)));
+    let mut mates_orient = coop_mates_on(&hills, &|x, z| terrain.height(x, z));
+    for m in &mut mates_orient.teammates {
+        // Kai banks through a corner on the flat, Mo sits on whatever slope he is on.
+        (m.pitch, m.roll) = if m.id == "kai" { (-0.25, 0.45) } else { slope_attitude(&terrain, (m.x, m.z), m.yaw) };
+    }
     let mut bridge_sedan = snap_3d(cfg_3d(sedan), &terrain, (-100.0, -500.0), std::f32::consts::FRAC_PI_2, WORLD_CAL);
     bridge_sedan.pkt.position_y = bridge.pkt.position_y;
     // In the tunnel under the big hill, heading east, the own trail coming in from the west portal.
@@ -1201,8 +1232,8 @@ fn render_3d_states() -> Result<(), String> {
     let mut mates_tunnel = CoopLayer::default();
     mates_tunnel.in_session = true;
     mates_tunnel.teammates = vec![
-        Remote { id: "kai".into(), name: "Kai".into(), x: -300.0, z: 210.0, y: Some(tunnel_y(&terrain, -300.0, 210.0) + 0.45), yaw: std::f32::consts::FRAC_PI_2, colour: crate::ui::coop::hue_color(36.0), paused: false },
-        Remote { id: "mo".into(), name: "Mo".into(), x: -300.0, z: 330.0, y: Some(terrain.height(-300.0, 330.0)), yaw: 0.0, colour: crate::ui::coop::hue_color(200.0), paused: false },
+        Remote { id: "kai".into(), name: "Kai".into(), x: -300.0, z: 210.0, y: Some(tunnel_y(&terrain, -300.0, 210.0) + 0.45), yaw: std::f32::consts::FRAC_PI_2, pitch: 0.0, roll: 0.0, colour: crate::ui::coop::hue_color(36.0), paused: false },
+        Remote { id: "mo".into(), name: "Mo".into(), x: -300.0, z: 330.0, y: Some(terrain.height(-300.0, 330.0)), yaw: 0.0, pitch: 0.0, roll: 0.0, colour: crate::ui::coop::hue_color(200.0), paused: false },
     ];
     let hills_trail = own_trail(&hills, (-120.0 - 300.0 * hill_yaw.sin(), -40.0 - 300.0 * hill_yaw.cos()), 30, &|x, z| terrain.height(x, z));
 
@@ -1220,6 +1251,9 @@ fn render_3d_states() -> Result<(), String> {
         ("coop_tunnel", &hills, &mates_tunnel),
         ("coop_sedan", &hills_sedan, &mates),
         ("coop_tunnel_sedan", &hills_sedan, &mates_tunnel),
+        ("hills_sedan_orient", &hills_sedan_orient, &hills_trail),
+        ("hills_arrow_orient", &hills_arrow_orient, &hills_trail),
+        ("coop_sedan_orient", &hills_sedan_orient, &mates_orient),
         ("hills_trail", &hills, &hills_trail),
         ("hills_sedan", &hills_sedan, &hills_trail),
         ("bridge_sedan", &bridge_sedan, &none),
@@ -1243,14 +1277,16 @@ fn render_3d_states() -> Result<(), String> {
                     check(&mut failures, &img, &id, (cx, cy), bgc, "rounded corner stays clear");
                 }
                 // The own arrow above the scene, at the car's row (85 % down); the co-op colour in a session.
-                let own = if matches!(*name, "coop" | "coop_tunnel" | "coop_sedan" | "coop_tunnel_sedan") {
+                let own = if matches!(*name, "coop" | "coop_tunnel" | "coop_sedan" | "coop_tunnel_sedan" | "coop_sedan_orient") {
                     let [r, g, b, _] = crate::ui::coop::hue_color(hills.coop_hue).to_array();
                     [r, g, b]
                 } else {
                     [255, 255, 255]
                 };
                 // (the 3D marker is a lit model: its top is the colour, near the car point)
-                check_near(&mut failures, &img, &id, (104, 114), 6, own, 10, "car marker over the scene");
+                // (a tilted model is lit differently: its top is a little darker than the flat one's pure colour)
+                let tol = if name.ends_with("_orient") { 40 } else { 10 };
+                check_near(&mut failures, &img, &id, (104, 114), 6, own, tol, "car marker over the scene");
                 // D89: a teammate is a 3D model in their colour (lit tops are the pure colour), the
                 // one in the tunnel down at the road.
                 if matches!(*name, "coop_tunnel" | "coop_tunnel_sedan") {
@@ -1336,6 +1372,17 @@ fn render_3d_states() -> Result<(), String> {
     for (what, d, min) in [("relief vs the tilted 2D map", d_relief, 3000), ("GL roads", d_roads, 300), ("the satellite image", d_image, 3000)] {
         if d < min {
             failures.push(format!("3D hills: {what} barely changed the picture ({d} px < {min})"));
+        }
+    }
+    // D100: Car orientation on changes the cars (the own one and the teammates) and nothing else.
+    for (what, a, b) in [("own sedan", "hills_sedan", "hills_sedan_orient"), ("teammates", "coop_sedan", "coop_sedan_orient")] {
+        let d = differing(&imgs[a], &imgs[b]);
+        println!("  {what}: yaw-only vs orientation: {d} px");
+        if d < 15 {
+            failures.push(format!("3D {what}: Car orientation barely changed the picture ({d} px < 15)"));
+        }
+        if d > 2500 {
+            failures.push(format!("3D {what}: Car orientation changed too much of the picture ({d} px > 2500)"));
         }
     }
     // D82 call-site fix: with Other roads = Normal the race road is still the GL scene's (a lit,

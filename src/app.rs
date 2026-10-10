@@ -432,6 +432,10 @@ pub struct CoopSeen {
     pub y: f32,
     pub z: f32,
     pub yaw: f32,
+    /// Last known pitch / roll, with the yaw: the 3D map's Car orientation option draws a
+    /// paused teammate at its last attitude (D100).
+    pub pitch: f32,
+    pub roll: f32,
     /// Last non-empty car class/PI (a paused game transmits zeros — keep the
     /// previous real values so the player list doesn't fall back to "D 0").
     pub car_class: i32,
@@ -576,6 +580,8 @@ pub struct ForzaApp {
     pub minimap_cached_car_z: f32,
     pub minimap_cached_yaw: f32,
     pub minimap_cached_raw_yaw: f32, // always raw pkt.yaw, for arrow orientation
+    pub minimap_cached_pitch: f32, // raw pkt.pitch / roll with it: the 3D car marker's Car orientation (D100)
+    pub minimap_cached_roll: f32,
     pub minimap_look: crate::minimap::LookAround, // right-stick look-around; owns the drawn view yaw
     pub minimap_smoothed_yaw: f32,   // lerped yaw used for actual rendering
     minimap_img_receiver: Option<Receiver<MapLoadMessage>>,
@@ -940,6 +946,8 @@ impl ForzaApp {
             minimap_cached_car_z: 0.0,
             minimap_cached_yaw: 0.0,
             minimap_cached_raw_yaw: 0.0,
+            minimap_cached_pitch: 0.0,
+            minimap_cached_roll: 0.0,
             minimap_look: Default::default(),
             minimap_smoothed_yaw: 0.0,
             minimap_img_receiver: map_rx,
@@ -1574,6 +1582,8 @@ impl ForzaApp {
                 y: p.position_y,
                 z: p.position_z,
                 yaw: p.yaw,
+                pitch: p.pitch,
+                roll: p.roll,
                 car_class: p.car_class,
                 pi: p.car_performance_index,
             });
@@ -1582,6 +1592,8 @@ impl ForzaApp {
                 e.y = p.position_y;
                 e.z = p.position_z;
                 e.yaw = p.yaw;
+                e.pitch = p.pitch;
+                e.roll = p.roll;
             }
             if p.car_performance_index != 0 {
                 e.car_class = p.car_class;
@@ -1763,6 +1775,8 @@ impl eframe::App for ForzaApp {
                         self.minimap_cached_yaw =
                             crate::minimap::target_yaw(pkt, self.config.minimap_use_movement_dir);
                         self.minimap_cached_raw_yaw = pkt.yaw;
+                        self.minimap_cached_pitch = pkt.pitch;
+                        self.minimap_cached_roll = pkt.roll;
                     }
                 }
             }

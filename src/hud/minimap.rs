@@ -353,7 +353,7 @@ pub struct CoopLayer {
     /// Trails by player: `"local"` or the co-op player id.
     pub trails: HashMap<String, Trail>,
     /// Last position/heading from an unpaused packet, per player id.
-    last_pos: HashMap<String, (f32, f32, f32, f32)>, // x, y, z, yaw
+    last_pos: HashMap<String, (f32, f32, f32, [f32; 3])>, // x, y, z, (yaw, pitch, roll)
     /// When `update` last ran (the trail fade's "now").
     now: Option<Instant>,
 }
@@ -397,7 +397,7 @@ impl CoopLayer {
             for (info, rp) in &input.remotes {
                 let paused = rp.is_paused();
                 if !paused {
-                    self.last_pos.insert(info.id.clone(), (rp.position_x, rp.position_y, rp.position_z, rp.yaw));
+                    self.last_pos.insert(info.id.clone(), (rp.position_x, rp.position_y, rp.position_z, [rp.yaw, rp.pitch, rp.roll]));
                     if cfg.coop_trails {
                         mm::trail_push(self.trails.entry(info.id.clone()).or_default(), rp.position_x, rp.position_y, rp.position_z, now, max_age);
                     }
@@ -407,8 +407,8 @@ impl CoopLayer {
                 }
                 // A paused packet sits at the world origin; draw their last known spot, or
                 // nothing if they were never seen at a valid one.
-                let pos = if paused { self.last_pos.get(&info.id).copied() } else { Some((rp.position_x, rp.position_y, rp.position_z, rp.yaw)) };
-                if let Some((x, y, z, yaw)) = pos {
+                let pos = if paused { self.last_pos.get(&info.id).copied() } else { Some((rp.position_x, rp.position_y, rp.position_z, [rp.yaw, rp.pitch, rp.roll])) };
+                if let Some((x, y, z, [yaw, pitch, roll])) = pos {
                     self.teammates.push(Remote {
                         id: info.id.clone(),
                         name: info.name.clone(),
@@ -416,6 +416,8 @@ impl CoopLayer {
                         z,
                         y: Some(y),
                         yaw,
+                        pitch,
+                        roll,
                         colour: crate::ui::coop::hue_color(info.hue),
                         paused,
                     });
@@ -644,8 +646,11 @@ pub fn draw(p: &Painter, xf: &Xf, snap: &HudSnapshot, now: f64, anim: &mut MapAn
         use crate::maprender::gl3d::{add_marker, Marker3d, MarkerScene};
         let car_y = car_height(snap).map_or_else(|| sc.terrain.height(car.0, car.1), |y| y - 1.0);
         let kind = lc.tilt.relief.marker;
-        let marker = Marker3d { pos: [car.0, car_y, car.1], yaw: snap.pkt.yaw, kind, colour: own };
-        let mates = map_shared::remote_markers_3d(&cv, &coop.teammates, kind, round);
+        // D100: with the Car orientation option the telemetry's pitch and roll too, else yaw only.
+        let orient = lc.tilt.relief.car_orientation;
+        let (pitch, roll) = if orient { (snap.pkt.pitch, snap.pkt.roll) } else { (0.0, 0.0) };
+        let marker = Marker3d { pos: [car.0, car_y, car.1], yaw: snap.pkt.yaw, pitch, roll, kind, colour: own };
+        let mates = map_shared::remote_markers_3d(&cv, &coop.teammates, kind, orient, round);
         add_marker(&p.with_clip_rect(rect), &sc.gl3d, MarkerScene { cam: c3.clone(), marker, mates, a: xf.a, s: xf.s, corner_radius: xf.l(fr.radius) });
     }
     // Names and edge pointers always; the arrows only while the flat map stands in for the scene.

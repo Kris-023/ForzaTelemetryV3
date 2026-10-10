@@ -291,6 +291,13 @@ three modes, picked with a segmented control (`theme::segmented`) at the top of 
     tunnels." *Why a choice:* the user asked for both and to decide himself; Arrow keeps today's look.
     Models, sizing and the tunnel rule: `docs/features/minimap.md`, "3D: the own car and the trails in
     the scene".
+  - **Car orientation** (`ReliefCfg::car_orientation`, D100): a checkbox under Car marker, **off** by
+    default. On: your 3D car or arrow and your co-op teammates' are drawn with the pitch and roll the
+    game reports, not just the heading, so they sit on slopes and bank in corners. Tooltip: "Tilts your
+    3D car or arrow, and your teammates', with the pitch and roll the game reports, so it sits on slopes
+    and banks into corners. Off: it only turns with the heading." Per map, travels with the View mode
+    card in "Copy to…"; only 3D (Flat / Tilted draw the flat arrow). Why off, the sign convention and
+    the pivot: `docs/features/minimap.md`, "Car orientation (D100)".
 
 The control writes only `tilt.on` / `tilt.relief.on` (`TiltCfg::set_view_mode`; the mode is derived by
 `view_mode()`), so switching Flat -> 3D -> Tilted keeps every value the user set. Code:

@@ -504,6 +504,12 @@ pub struct ReliefCfg {
     /// The own-car marker in the 3D scene (D78): a 3D arrow (default, today's look) or a
     /// low-poly sedan. Flat / Tilted always draw the flat arrow.
     pub marker: MarkerStyle,
+    /// Draw the 3D car markers - yours and your co-op teammates' - with the telemetry's full
+    /// orientation, yaw, pitch **and roll** (D100), instead of the yaw only: on a slope the model
+    /// sits parallel to the road, in a corner it banks. Off by default: it keeps today's look, and
+    /// the model is scaled up on the HUD minimap, where a tilted model would swing visibly.
+    /// Only 3D draws these models; Flat / Tilted always draw the flat arrow.
+    pub car_orientation: bool,
 }
 
 /// What the own car looks like in the 3D scene (D78). *Why a choice:* the user asked for both
@@ -538,7 +544,7 @@ impl ReliefCfg {
 
 impl Default for ReliefCfg {
     fn default() -> Self {
-        Self { on: false, road_height: RoadHeight::Nodes, deck_m: 3.0, exaggeration: 1.0, shading: 0.35, marker: MarkerStyle::Arrow }
+        Self { on: false, road_height: RoadHeight::Nodes, deck_m: 3.0, exaggeration: 1.0, shading: 0.35, marker: MarkerStyle::Arrow, car_orientation: false }
     }
 }
 
@@ -765,7 +771,7 @@ mod tests {
         let mut b = MapLayerConfig::hud();
         b.image.opacity = 0.2;
         b.tilt.angle_deg = 33.0;
-        b.tilt.relief = ReliefCfg { on: true, road_height: RoadHeight::Terrain, deck_m: 7.0, exaggeration: 2.0, shading: 0.8, marker: MarkerStyle::Sedan }; // the 3D settings travel with the view
+        b.tilt.relief = ReliefCfg { on: true, road_height: RoadHeight::Terrain, deck_m: 7.0, exaggeration: 2.0, shading: 0.8, marker: MarkerStyle::Sedan, car_orientation: true }; // the 3D settings travel with the view
         b.race_lines.width_px = 9.0;
         b.race_lines.focus.other_roads = OtherRoads::Hidden; // the focus travels with the race lines
         b.race_lines.focus.mute_alpha = 0.6;
@@ -853,6 +859,7 @@ mod tests {
     fn relief_defaults_and_the_view_mode_derivation() {
         let r = ReliefCfg::default();
         assert_eq!((r.on, r.road_height, r.deck_m, r.exaggeration, r.shading, r.marker), (false, RoadHeight::Nodes, 3.0, 1.0, 0.35, MarkerStyle::Arrow));
+        assert!(!r.car_orientation, "off by default: today's yaw-only look");
         // Today's view modes stay: HUD tilted, Dashboard (and the Viewer) flat; 3D on neither.
         assert_eq!(MapLayerConfig::hud().tilt.view_mode(), ViewMode::Tilted);
         assert_eq!(MapLayerConfig::dashboard().tilt.view_mode(), ViewMode::Flat);
@@ -878,15 +885,16 @@ mod tests {
     #[test]
     fn relief_serde_round_trips_and_old_configs_get_the_defaults() {
         let mut c = MapLayerConfig::hud();
-        c.tilt.relief = ReliefCfg { on: true, road_height: RoadHeight::Terrain, deck_m: 5.0, exaggeration: 1.5, shading: 0.6, marker: MarkerStyle::Sedan };
+        c.tilt.relief = ReliefCfg { on: true, road_height: RoadHeight::Terrain, deck_m: 5.0, exaggeration: 1.5, shading: 0.6, marker: MarkerStyle::Sedan, car_orientation: true };
         let json_check = serde_json::to_string(&c.tilt.relief).unwrap();
-        assert!(json_check.contains(r#""marker":"sedan""#), "{json_check}");
+        assert!(json_check.contains(r#""marker":"sedan""#) && json_check.contains(r#""car_orientation":true"#), "{json_check}");
         let json = serde_json::to_string(&c).unwrap();
         assert!(json.contains(r#""road_height":"terrain""#), "{json}");
         assert_eq!(serde_json::from_str::<MapLayerConfig>(&json).unwrap(), c);
         // A config from before phase K has no `relief`: defaults; the tilt values survive.
         let old: MapLayerConfig = serde_json::from_str(r#"{"tilt":{"on":true,"angle_deg":40.0,"perspective_px":200.0,"car_y":0.85,"taper":true}}"#).unwrap();
         assert_eq!(old.tilt.relief, ReliefCfg::default());
+        assert!(!old.tilt.relief.car_orientation);
         assert_eq!(old.tilt.view_mode(), ViewMode::Tilted);
         // Partial relief merges with the defaults.
         let p: MapLayerConfig = serde_json::from_str(r#"{"tilt":{"relief":{"on":true,"deck_m":8.0}}}"#).unwrap();
@@ -895,10 +903,10 @@ mod tests {
 
     #[test]
     fn relief_sane_clamps_to_the_ranges() {
-        let wild = ReliefCfg { on: true, road_height: RoadHeight::Terrain, deck_m: -4.0, exaggeration: 99.0, shading: f32::NAN, marker: MarkerStyle::Sedan };
+        let wild = ReliefCfg { on: true, road_height: RoadHeight::Terrain, deck_m: -4.0, exaggeration: 99.0, shading: f32::NAN, marker: MarkerStyle::Sedan, car_orientation: true };
         let s = wild.sane();
         assert_eq!((s.deck_m, s.exaggeration, s.shading), (0.0, 3.0, 0.35));
-        assert!(s.on && s.road_height == RoadHeight::Terrain);
+        assert!(s.on && s.road_height == RoadHeight::Terrain && s.car_orientation);
         assert_eq!(ReliefCfg::default().sane(), ReliefCfg::default());
     }
 }

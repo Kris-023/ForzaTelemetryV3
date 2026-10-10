@@ -1021,10 +1021,11 @@ impl Gl3d {
                 let ppm = cam.view.scale * k_persp;
                 let k = marker::model_scale(m.kind, ppm, s);
                 let grow = marker::OUTLINE_PT * s.max(0.1) / ppm.max(1e-6);
-                let (sy, cy) = m.yaw.sin_cos();
+                let rot = marker::orientation(m.yaw, m.pitch, m.roll);
                 let c = m.colour;
                 gl.uniform_3_f32(p.u("uPos"), m.pos[0], m.pos[1] - marker::GROUND_BELOW_M, m.pos[2]);
-                gl.uniform_2_f32(p.u("uYaw"), sy, cy);
+                // column-major: right, up, forward
+                gl.uniform_matrix_3_f32_slice(p.u("uRot"), false, &[rot[0][0], rot[0][1], rot[0][2], rot[1][0], rot[1][1], rot[1][2], rot[2][0], rot[2][1], rot[2][2]]);
                 gl.uniform_3_f32(p.u("uColor"), c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0);
                 gl.bind_vertex_array(Some(g.vao));
                 // The outline hull: no depth at all.

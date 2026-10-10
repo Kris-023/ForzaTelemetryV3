@@ -616,6 +616,10 @@ fn relief_rows(ui: &mut Ui, r: &mut ReliefCfg) {
                 }
             });
     });
+    // D100: the telemetry's full orientation instead of the yaw only.
+    theme::checkbox_row(ui, &mut r.car_orientation, tr("Car orientation")).on_hover_text(tr(
+        "Tilts your 3D car or arrow, and your teammates', with the pitch and roll the game reports, so it sits on slopes and banks into corners. Off: it only turns with the heading.",
+    ));
     *r = r.sane();
 }
 
@@ -1275,7 +1279,7 @@ mod tests {
             perspective_px: 310.0,
             car_y: 0.7,
             taper: false,
-            relief: ReliefCfg { on: false, road_height: RoadHeight::Terrain, deck_m: 6.5, exaggeration: 2.0, shading: 0.8, marker: MarkerStyle::Sedan },
+            relief: ReliefCfg { on: false, road_height: RoadHeight::Terrain, deck_m: 6.5, exaggeration: 2.0, shading: 0.8, marker: MarkerStyle::Sedan, car_orientation: false },
         }
     }
 
@@ -1341,7 +1345,7 @@ mod tests {
     fn relief_values_are_clamped_to_the_cfg_ranges() {
         let ctx = crate::ui::test_render::context();
         let mut time = 0.0;
-        let wild = ReliefCfg { on: true, road_height: RoadHeight::Terrain, deck_m: -4.0, exaggeration: 99.0, shading: f32::NAN, marker: MarkerStyle::Sedan };
+        let wild = ReliefCfg { on: true, road_height: RoadHeight::Terrain, deck_m: -4.0, exaggeration: 99.0, shading: f32::NAN, marker: MarkerStyle::Sedan, car_orientation: false };
         let mut t = TiltCfg { on: true, relief: wild, ..TiltCfg::default() };
         settle(&ctx, &mut t, &mut time);
         let r = t.relief;
@@ -1385,7 +1389,7 @@ mod tests {
     #[test]
     fn copying_view_mode_copies_the_relief_fields() {
         let mut c = two_maps();
-        let relief = ReliefCfg { on: true, road_height: RoadHeight::Terrain, deck_m: 9.0, exaggeration: 2.5, shading: 0.9, marker: MarkerStyle::Sedan };
+        let relief = ReliefCfg { on: true, road_height: RoadHeight::Terrain, deck_m: 9.0, exaggeration: 2.5, shading: 0.9, marker: MarkerStyle::Sedan, car_orientation: false };
         c.overlay.map_layers.tilt.on = true;
         c.overlay.map_layers.tilt.relief = relief;
         assert_eq!(c.minimap_layers.tilt.relief, ReliefCfg::default());

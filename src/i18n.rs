@@ -1210,6 +1210,9 @@ fn de(s: &str) -> Option<&'static str> {
             => "Licht und Schatten an den Hängen über dem Satellitenbild.",
         "Car marker" => "Fahrzeugmarker",
         "Arrow" => "Pfeil",
+        "Car orientation" => "Fahrzeuglage",
+        "Tilts your 3D car or arrow, and your teammates', with the pitch and roll the game reports, so it sits on slopes and banks into corners. Off: it only turns with the heading."
+            => "Neigt dein 3D-Fahrzeug bzw. deinen Pfeil und die deiner Mitspieler mit Nick- und Rollwinkel aus dem Spiel, sodass es an Hängen auf der Straße liegt und sich in Kurven neigt. Aus: es dreht sich nur mit der Fahrtrichtung.",
         "How your car is drawn in the 3D view: a 3D arrow or a small car model. Both sit at the car's real position and height, also in tunnels."
             => "Wie dein Fahrzeug in der 3D-Ansicht gezeichnet wird: als 3D-Pfeil oder als kleines Automodell. Beide sitzen an der echten Position und Höhe des Fahrzeugs, auch in Tunneln.",
         "Angle" => "Winkel",

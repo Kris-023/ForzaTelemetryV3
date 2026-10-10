@@ -14,6 +14,12 @@
 //!   body colour, four octagonal wheels, head- and tail-lights. Read from above (the usual map
 //!   view) it is a body-coloured hood / roof / trunk split by the dark windscreen and rear window.
 //!
+//! # Orientation (D100)
+//!
+//! The model is placed with the telemetry's yaw, and - when the map's *Car orientation* option is on
+//! - pitch and roll too ([`orientation`] has the convention and why); off, the callers pass pitch =
+//! roll = 0, which is exactly the yaw-only model.
+//!
 //! Each vertex carries its face normal (flat shading), a smoothed normal (the outline pass pushes
 //! the hull out along it) and a material: `colour * k + fixed`, so the body follows the car colour
 //! (white solo, the co-op colour in a session) and glass / tyres / lights keep theirs.
@@ -45,11 +51,15 @@ use crate::maprender::cfg::MarkerStyle;
 
 /// One car in the scene (the own car, or a teammate: D89). `pos` is the telemetry position (x, y, z; y = the car's height in
 /// metres, *not* the terrain's), `yaw` the telemetry yaw (0 = north, clockwise: forward is
-/// `(sin yaw, cos yaw)` in (x, z)).
+/// `(sin yaw, cos yaw)` in (x, z)). `pitch` / `roll` are the telemetry's, radians ([`orientation`]);
+/// callers pass 0 unless the map's "Car orientation" option (D100) is on, and 0 / 0 is exactly the
+/// yaw-only model.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Marker3d {
     pub pos: [f32; 3],
     pub yaw: f32,
+    pub pitch: f32,
+    pub roll: f32,
     pub kind: MarkerStyle,
     pub colour: Color32,
 }
@@ -113,14 +123,54 @@ pub fn model_scale(kind: MarkerStyle, px_per_m: f32, s: f32) -> f32 {
     (kind.min_pt() * s.max(0.1) / (kind.len_m() * px_per_m)).max(1.0)
 }
 
+/// The car's orientation from the telemetry's `yaw`, `pitch` and `roll` (D100): the world images of
+/// the model's axes, as columns - `[right, up, forward]` - so `world = m[0] * x + m[1] * y + m[2] * z`
+/// (this is `uRot` of `MARKER_VS`, a column-major `mat3`).
+///
+/// Forza's world and car frames are left-handed (x right / east, y up, z forward / north) and its
+/// angles follow the Unity convention: the yaw turns north (z) towards east (x), clockwise from
+/// above, and pitch and roll are the same kind of rotation about the car's right and forward axes.
+/// The order is the engine's: roll about the car's forward axis first, then pitch about its right
+/// axis, then yaw about up (`R = Ry(yaw) * Rx(pitch) * Rz(roll)`). So **positive pitch = nose
+/// down, positive roll = right side up** (a negative pitch lifts the nose, a negative roll lowers
+/// the right side). *Why these signs:* the docs only say "radians"; a recorded telemetry file of a
+/// car parked on a slope (ground rising ahead, falling to the right, from the elevation raster)
+/// reports pitch -0.035 and roll -0.022, and the Unity convention gives the same signs. With
+/// `pitch = roll = 0` it is the yaw-only matrix: right `(cos, 0, -sin)`, forward `(sin, 0, cos)`.
+pub fn orientation(yaw: f32, pitch: f32, roll: f32) -> [[f32; 3]; 3] {
+    let (sy, cy) = yaw.sin_cos();
+    let (sp, cp) = pitch.sin_cos();
+    let (sr, cr) = roll.sin_cos();
+    [
+        [cy * cr + sy * sp * sr, cp * sr, -sy * cr + cy * sp * sr],
+        [-cy * sr + sy * sp * cr, cp * cr, sy * sr + cy * sp * cr],
+        [sy * cp, -sp, cy * cp],
+    ]
+}
+
 /// Where a model-space point (metres, x right, y up, z forward) lands in the world for a marker at
-/// `pos` heading `yaw`, scaled `k`, under the exaggeration `exag`: the very maths of `MARKER_VS`.
-/// The returned y is in real metres (the shader multiplies it by `exag` like every world point).
-pub fn model_to_world(local: [f32; 3], pos: [f32; 3], yaw: f32, k: f32, exag: f32) -> [f32; 3] {
-    let (s, c) = yaw.sin_cos();
-    let (lx, ly, lz) = (local[0] * k, local[1] * k, local[2] * k);
-    // right = (cos, 0, -sin), forward = (sin, 0, cos)
-    [pos[0] + lx * c + lz * s, pos[1] - GROUND_BELOW_M + ly / exag.max(0.01), pos[2] - lx * s + lz * c]
+/// `pos` with the orientation `yaw` / `pitch` / `roll` ([`orientation`]), scaled `k`, under the
+/// exaggeration `exag`: the very maths of `MARKER_VS`. The model turns about its origin, the
+/// ground point under the telemetry position. The returned y is in real metres (the shader
+/// multiplies it by `exag` like every world point); the model's height is divided by `exag` after
+/// the turn, so it keeps its shape with the hills stretched.
+pub fn model_to_world(local: [f32; 3], pos: [f32; 3], yaw: f32, pitch: f32, roll: f32, k: f32, exag: f32) -> [f32; 3] {
+    let m = orientation(yaw, pitch, roll);
+    let l = [local[0] * k, local[1] * k, local[2] * k];
+    let d = |i: usize| m[0][i] * l[0] + m[1][i] * l[1] + m[2][i] * l[2];
+    [pos[0] + d(0), pos[1] - GROUND_BELOW_M + d(1) / exag.max(0.01), pos[2] + d(2)]
+}
+
+/// Test helper: the pitch and roll that make the car's up axis `up` (a unit vector) at heading
+/// `yaw` - the attitude a car parked on a surface with that normal reports. Inverse of
+/// [`orientation`]'s up column: `up . right_h = -sin(roll)`, `up . forward_h = sin(pitch) cos(roll)`,
+/// `up.y = cos(pitch) cos(roll)` (`_h` = the horizontal heading axes).
+#[cfg(test)]
+pub(crate) fn attitude_for_up(yaw: f32, up: [f32; 3]) -> (f32, f32) {
+    let (sy, cy) = yaw.sin_cos();
+    let along = up[0] * sy + up[2] * cy;
+    let across = up[0] * cy - up[2] * sy;
+    (along.atan2(up[1]), (-across).asin())
 }
 
 // ── geometry ─────────────────────────────────────────────────────────────────────────────────
@@ -465,18 +515,112 @@ mod tests {
     fn marker_transform_places_the_model_at_the_car_heading_its_yaw() {
         let pos = [100.0, 50.0, -200.0];
         // Model origin: the ground under the telemetry point.
-        let o = model_to_world([0.0, 0.0, 0.0], pos, 0.7, 1.0, 1.0);
+        let o = model_to_world([0.0, 0.0, 0.0], pos, 0.7, 0.0, 0.0, 1.0, 1.0);
         assert!((o[0] - 100.0).abs() < 1e-4 && (o[1] - (50.0 - GROUND_BELOW_M)).abs() < 1e-4 && (o[2] + 200.0).abs() < 1e-4);
         // Yaw 0 = north: forward is +z; a quarter turn clockwise: forward is east (+x), right is south.
-        let f = model_to_world([0.0, 0.0, 2.0], pos, 0.0, 1.0, 1.0);
+        let f = model_to_world([0.0, 0.0, 2.0], pos, 0.0, 0.0, 0.0, 1.0, 1.0);
         assert!((f[2] - (-198.0)).abs() < 1e-4 && (f[0] - 100.0).abs() < 1e-4);
-        let f = model_to_world([0.0, 0.0, 2.0], pos, std::f32::consts::FRAC_PI_2, 1.0, 1.0);
+        let f = model_to_world([0.0, 0.0, 2.0], pos, std::f32::consts::FRAC_PI_2, 0.0, 0.0, 1.0, 1.0);
         assert!((f[0] - 102.0).abs() < 1e-4 && (f[2] + 200.0).abs() < 1e-4, "{f:?}");
-        let r = model_to_world([1.0, 0.0, 0.0], pos, std::f32::consts::FRAC_PI_2, 1.0, 1.0);
+        let r = model_to_world([1.0, 0.0, 0.0], pos, std::f32::consts::FRAC_PI_2, 0.0, 0.0, 1.0, 1.0);
         assert!((r[2] - (-201.0)).abs() < 1e-4, "right of an east-bound car is south: {r:?}");
         // Scale grows the model about its ground point; the exaggeration does not stretch it.
-        let t = model_to_world([0.0, 1.4, 0.0], pos, 0.0, 3.0, 2.0);
+        let t = model_to_world([0.0, 1.4, 0.0], pos, 0.0, 0.0, 0.0, 3.0, 2.0);
         assert!((t[1] - (50.0 - GROUND_BELOW_M + 1.4 * 3.0 / 2.0)).abs() < 1e-4);
+    }
+
+    /// `a` and `b` agree to within `tol`.
+    fn close(a: [f32; 3], b: [f32; 3], tol: f32) -> bool {
+        (0..3).all(|i| (a[i] - b[i]).abs() <= tol)
+    }
+
+    #[test]
+    fn orientation_without_pitch_and_roll_is_exactly_the_yaw_only_basis() {
+        for yaw in [0.0f32, 0.6, 1.25, std::f32::consts::FRAC_PI_2, 3.0, -2.2, 6.1] {
+            let (s, c) = yaw.sin_cos();
+            // right = (cos, 0, -sin), up, forward = (sin, 0, cos): what the shader used before D100.
+            assert_eq!(orientation(yaw, 0.0, 0.0), [[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]], "yaw {yaw}");
+        }
+        // ... and the world position of a model point is the old yaw-only formula.
+        let pos = [100.0, 50.0, -200.0];
+        for p in [[0.0, 0.0, 2.3], [0.9, 0.3, -1.0], [-0.5, 1.4, 0.2]] {
+            let (s, c) = 0.7f32.sin_cos();
+            let old = [pos[0] + p[0] * 2.0 * c + p[2] * 2.0 * s, pos[1] - GROUND_BELOW_M + p[1] * 2.0 / 1.5, pos[2] - p[0] * 2.0 * s + p[2] * 2.0 * c];
+            assert!(close(model_to_world(p, pos, 0.7, 0.0, 0.0, 2.0, 1.5), old, 1e-4));
+        }
+    }
+
+    #[test]
+    fn a_nose_up_pitch_lifts_the_front_and_a_right_side_down_roll_lowers_the_right() {
+        let pos = [0.0, 10.0, 0.0];
+        let front = [0.0, 0.5, 2.3];
+        let y0 = model_to_world(front, pos, 0.9, 0.0, 0.0, 1.0, 1.0)[1];
+        // The telemetry reports a nose-up car with a NEGATIVE pitch (see `orientation`).
+        let y_up = model_to_world(front, pos, 0.9, -0.2, 0.0, 1.0, 1.0)[1];
+        assert!((y_up - y0 - (0.2f32.sin() * 2.3 + (0.2f32.cos() - 1.0) * 0.5)).abs() < 1e-4, "{y0} -> {y_up}");
+        assert!(y_up > y0 + 0.4);
+        // ... the tail drops, and a nose-down (positive) pitch is the mirror image.
+        assert!(model_to_world([0.0, 0.5, -2.3], pos, 0.9, -0.2, 0.0, 1.0, 1.0)[1] < y0 - 0.4);
+        assert!(model_to_world(front, pos, 0.9, 0.2, 0.0, 1.0, 1.0)[1] < y0 - 0.4);
+        // Pitch never lifts a side.
+        let (l, r) = (model_to_world([-0.9, 0.5, 0.0], pos, 0.9, -0.2, 0.0, 1.0, 1.0)[1], model_to_world([0.9, 0.5, 0.0], pos, 0.9, -0.2, 0.0, 1.0, 1.0)[1]);
+        assert!((l - r).abs() < 1e-4);
+        // Right side down: negative roll lowers the right side, raises the left.
+        let right = [0.9, 0.5, 0.0];
+        let left = [-0.9, 0.5, 0.0];
+        let (yr0, yl0) = (model_to_world(right, pos, 0.9, 0.0, 0.0, 1.0, 1.0)[1], model_to_world(left, pos, 0.9, 0.0, 0.0, 1.0, 1.0)[1]);
+        let (yr, yl) = (model_to_world(right, pos, 0.9, 0.0, -0.2, 1.0, 1.0)[1], model_to_world(left, pos, 0.9, 0.0, -0.2, 1.0, 1.0)[1]);
+        assert!(yr < yr0 - 0.15 && yl > yl0 + 0.15, "right {yr0} -> {yr}, left {yl0} -> {yl}");
+        // Roll never lifts the nose beyond the small cos effect on its height.
+        let (n0, n1) = (model_to_world(front, pos, 0.9, 0.0, 0.0, 1.0, 1.0)[1], model_to_world(front, pos, 0.9, 0.0, -0.2, 1.0, 1.0)[1]);
+        assert!((n1 - n0).abs() < 0.5 * (1.0 - 0.2f32.cos()) + 1e-4);
+        // The exaggeration divides the whole rotated height, so the model keeps its real shape after
+        // the shader multiplies it back.
+        let e = model_to_world(front, pos, 0.9, -0.2, 0.0, 1.0, 2.0)[1];
+        assert!(((e - (pos[1] - GROUND_BELOW_M)) * 2.0 - (y_up - (pos[1] - GROUND_BELOW_M))).abs() < 1e-4);
+    }
+
+    #[test]
+    fn orientation_is_a_rotation_composed_roll_then_pitch_then_yaw() {
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+        for (yaw, pitch, roll) in [(0.0f32, 0.0f32, 0.0f32), (0.6, -0.2, 0.3), (2.5, 0.4, -0.5), (-1.0, -0.5, -0.1), (5.0, 0.1, 0.9)] {
+            let [r, u, f] = orientation(yaw, pitch, roll);
+            for a in [r, u, f] {
+                assert!((dot(a, a) - 1.0).abs() < 1e-5);
+            }
+            assert!(dot(r, u).abs() < 1e-5 && dot(u, f).abs() < 1e-5 && dot(f, r).abs() < 1e-5);
+            // A proper rotation of the (x, y, z) axes (no mirroring): right x up = forward, as for the identity.
+            assert!(close(cross(r, u), f, 1e-5), "right x up = forward");
+            // The forward axis does not depend on the roll (roll is about it).
+            assert!(close(orientation(yaw, pitch, 0.0)[2], f, 1e-6));
+            // The yaw is applied last: turning the yaw turns the whole pitched / rolled car about the vertical.
+            let [r0, u0, f0] = orientation(0.0, pitch, roll);
+            let (s, c) = yaw.sin_cos();
+            let turn = |v: [f32; 3]| [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c];
+            assert!(close(turn(r0), r, 1e-5) && close(turn(u0), u, 1e-5) && close(turn(f0), f, 1e-5));
+        }
+        // The car's forward tilts by exactly the pitch.
+        let f = orientation(1.3, -0.35, 0.8)[2];
+        assert!((f[1] - 0.35f32.sin()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_car_with_the_attitude_of_a_slope_sits_parallel_to_it() {
+        // A plane y = 0.12 x - 0.07 z (gentle slope), the car heading 40 degrees off north.
+        let (gx, gz) = (0.12f32, -0.07f32);
+        let l = (gx * gx + 1.0 + gz * gz).sqrt();
+        let n = [-gx / l, 1.0 / l, -gz / l];
+        for yaw in [0.0f32, 0.7, 2.0, 4.0] {
+            let (pitch, roll) = attitude_for_up(yaw, n);
+            let [r, u, f] = orientation(yaw, pitch, roll);
+            assert!(close(u, n, 1e-5), "up {u:?} vs normal {n:?} at yaw {yaw}");
+            // The wheels' plane contains the slope: forward and right are perpendicular to the normal.
+            assert!((f[0] * n[0] + f[1] * n[1] + f[2] * n[2]).abs() < 1e-5 && (r[0] * n[0] + r[1] * n[1] + r[2] * n[2]).abs() < 1e-5);
+            // Uphill ahead = nose up = negative pitch.
+            let uphill = f[0] * gx + f[2] * gz; // the ground rise per metre ahead
+            assert_eq!(uphill > 0.0, pitch < 0.0, "yaw {yaw}: rise {uphill}, pitch {pitch}");
+        }
     }
 
     #[test]
