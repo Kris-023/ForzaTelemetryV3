@@ -498,7 +498,22 @@ impl LayerCtx<'_> {
             Deco::Cap(at, dir) => self.round_cap(at, dir, r, col),
             Deco::Wedge(at, n, tip) => {
                 if self.fits(at, r * tip.length()) {
-                    self.p.add(Shape::convex_polygon(vec![at, at + n * r, at + tip * r], col, Stroke::NONE));
+                    let tri = [at, at + n * r, at + tip * r];
+                    if tip.length() < WEDGE_FEATHER_MIN_F {
+                        // A slight bend: a sliver with a needle-sharp corner at the node. egui's
+                        // anti-aliasing pushes a polygon's fringe out along each corner's bisector
+                        // by 1 / sin(half the corner angle), i.e. 100+ px here: the fringe drew
+                        // thin lines through the join across the map (D99). Plain triangle, no
+                        // fringe; its one outer edge is a fraction of a pixel to ~half the width.
+                        let mut m = Mesh::default();
+                        for p in tri {
+                            m.colored_vertex(p, col);
+                        }
+                        m.add_triangle(0, 1, 2);
+                        self.p.add(Shape::mesh(m));
+                    } else {
+                        self.p.add(Shape::convex_polygon(tri.to_vec(), col, Stroke::NONE));
+                    }
                 }
             }
         }
@@ -626,6 +641,12 @@ enum Deco {
     /// the bisector.
     Wedge(Pos2, Vec2, Vec2),
 }
+
+/// A mitre wedge whose tip lies less than this many half-widths out (a turn under 60 degrees:
+/// `1 / cos 30°`) is drawn without egui's anti-aliasing fringe (D99): its corner at the node is
+/// so sharp that the fringe there reaches far across the map. From 60 degrees on that corner is
+/// 30 degrees or more and the fringe stays within ~2 px, inside the road.
+const WEDGE_FEATHER_MIN_F: f32 = 1.1547;
 
 /// The outer normal and the mitre tip (per unit of half-width) where a line arriving along `din`
 /// turns into `dout` (unit vectors); `None` when it runs on straight (nothing to fill) or turns
@@ -3119,5 +3140,54 @@ mod tests {
             draw_base(p, &BaseParams { cam: &cam, cal, tex, outline: &outline, mirror: false, look: ImageLook::FULL, a: 1.0, far_fade: false });
         });
         assert_eq!(full.iter().filter(|s| matches!(s.shape, Shape::Mesh(_))).count(), 1);
+    }
+
+    /// D99: a slight bend at the join of two pieces (a highway running into a tunnel, a type
+    /// change on a gentle curve) in the tilted view drew thin lines through the join far across
+    /// the map. The mitre wedge there is a sliver with a needle-sharp corner at the node, and
+    /// egui's anti-aliasing fringe of that corner reached 100+ px out. Now nothing drawn (fringe
+    /// included) lies further from the road's axis than its casing plus a few px.
+    #[test]
+    fn a_slight_bend_at_a_join_draws_no_stray_lines_in_the_tilted_view() {
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(200.0, 200.0));
+        let tilt = MapLayerConfig::hud().tilt;
+        for bend_deg in [1.5f32, 4.0, 10.0, 25.0, 50.0, 80.0] {
+            for (ta, tb) in [(RoadType::Highway, RoadType::Tunnel), (RoadType::Highway, RoadType::Highway), (RoadType::Road, RoadType::Highway)] {
+                let b = bend_deg.to_radians();
+                let node = [0.0, 30.0];
+                let a_pts = [[0.0, -80.0], node];
+                let b_pts = [node, [node[0] + 120.0 * b.sin(), node[1] + 120.0 * b.cos()]];
+                let l = layers_of(&[(ta, &a_pts, 0.0), (tb, &b_pts, 0.0)]);
+                let cam = Camera::from_cfg(&tilt, (0.0, 0.0), 0.0, 150.0, rect);
+                let cfg = only_roads();
+                let shapes = paint(rect, |p| {
+                    draw_layers(&ctx(p, &cam), &l, &cfg);
+                });
+                // egui's tessellation with its anti-aliasing fringe (what is on screen).
+                let mut t = egui::epaint::Tessellator::new(1.0, egui::epaint::TessellationOptions::default(), [1, 1], vec![]);
+                let mut mesh = Mesh::default();
+                for s in &shapes {
+                    t.tessellate_shape(s.shape.clone(), &mut mesh);
+                }
+                assert!(!mesh.vertices.is_empty());
+                let axis: Vec<Pos2> = [a_pts[0], node, b_pts[1]].iter().map(|q| cam.project(q[0], q[1]).unwrap()).collect();
+                let dist = |p: Pos2| {
+                    axis.windows(2)
+                        .map(|w| {
+                            let (d, v) = (w[1] - w[0], p - w[0]);
+                            let f = (v.dot(d) / d.length_sq()).clamp(0.0, 1.0);
+                            (v - d * f).length()
+                        })
+                        .fold(f32::MAX, f32::min)
+                };
+                // The widest half-width: the highway's fill plus its casing (taper k <= ~1.3).
+                let base = style::road_base_px(&cfg.roads, cam.scale());
+                let half = 0.5 * (style::line_px(base, cfg.roads.styles.highway.width) + cfg.roads.casing_px) * 1.4;
+                for v in mesh.vertices.iter().filter(|v| v.color.a() > 0) {
+                    let d = dist(v.pos);
+                    assert!(d <= half + 3.0, "{ta:?} -> {tb:?} bend {bend_deg} deg: a vertex {d:.1} px off the road (half-width {half:.1}) at {:?}", v.pos);
+                }
+            }
+        }
     }
 }

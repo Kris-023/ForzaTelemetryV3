@@ -421,6 +421,13 @@ on 1 px along the corner's bisector (egui mitres the corner onto that short last
 square to it, i.e. along the bisector, where the next piece ends the same way; the 1 px overlap hides
 the anti-aliasing seam) plus a **mitre wedge** (`Deco::Wedge`: the triangle node, outer edge point, mitre
 tip, in each pass's width and colour, because egui bevels that short segment's outer corner). A
+wedge of a turn under 60 degrees (`WEDGE_FEATHER_MIN_F`) is a plain mesh triangle without egui's
+anti-aliasing fringe (D99). *Why:* its corner at the node is needle-sharp on a slight bend, and egui
+pushes a polygon's fringe out along each corner's bisector by `1 / sin(corner / 2)`: on a 1-5 degree
+bend (e.g. a highway running into a tunnel; reported in the tilted view, reproduced in flat too)
+that drew thin lines in the road's and casing's colours through the join
+100+ px across the map. From 60 degrees on the corner is 30 degrees or more and the fringe stays
+within ~2 px, inside the road, so wider turns keep their anti-aliased outer edge. A
 `Dead` / `Junction` end gets a **round cap** (`Deco::Cap`: a half disc reaching 1 px back into the
 line). The fill's caps and wedges are skipped for a translucent or dashed fill (a translucent one would
 darken where it meets its own line, a dashed one ending in a gap would get a dot); the casing's always
