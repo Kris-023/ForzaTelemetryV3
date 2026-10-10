@@ -922,11 +922,11 @@ pub fn draw(ui: &mut Ui, app: &ForzaApp, rect: Rect, texture: &egui::TextureHand
         .iter()
         .filter_map(|(info, pkt)| {
             let paused = pkt.is_paused();
-            let (x, y, z, yaw) = if paused {
+            let (x, y, z, yaw, pitch, roll) = if paused {
                 let s = app.coop_last_pos.get(&info.id)?; // never seen at a valid spot — nothing to show
-                (s.x, s.y, s.z, s.yaw)
+                (s.x, s.y, s.z, s.yaw, s.pitch, s.roll)
             } else {
-                (pkt.position_x, pkt.position_y, pkt.position_z, pkt.yaw)
+                (pkt.position_x, pkt.position_y, pkt.position_z, pkt.yaw, pkt.pitch, pkt.roll)
             };
             Some(crate::hud::map_shared::Remote {
                 id: info.id.clone(),
@@ -935,6 +935,8 @@ pub fn draw(ui: &mut Ui, app: &ForzaApp, rect: Rect, texture: &egui::TextureHand
                 z,
                 y: Some(y),
                 yaw,
+                pitch,
+                roll,
                 colour: crate::ui::coop::hue_color(info.hue),
                 paused,
             })
@@ -949,8 +951,11 @@ pub fn draw(ui: &mut Ui, app: &ForzaApp, rect: Rect, texture: &egui::TextureHand
             let live = app.telemetry.latest.as_ref().filter(|p| p.is_race_on != 0 && !p.is_paused());
             let y = live.map_or_else(|| rel.terrain.height(car_x, car_z), |p| p.position_y);
             let kind = lc.tilt.relief.marker;
-            let marker = crate::maprender::gl3d::Marker3d { pos: [car_x, y, car_z], yaw: app.minimap_cached_raw_yaw, kind, colour: local_col };
-            let mate_markers = crate::hud::map_shared::remote_markers_3d(&cv, &mates, kind, false);
+            // D100: with the Car orientation option the telemetry's pitch and roll too, else yaw only.
+            let orient = lc.tilt.relief.car_orientation;
+            let (pitch, roll) = if orient { (app.minimap_cached_pitch, app.minimap_cached_roll) } else { (0.0, 0.0) };
+            let marker = crate::maprender::gl3d::Marker3d { pos: [car_x, y, car_z], yaw: app.minimap_cached_raw_yaw, pitch, roll, kind, colour: local_col };
+            let mate_markers = crate::hud::map_shared::remote_markers_3d(&cv, &mates, kind, orient, false);
             app.map3d.add_marker(&painter, &cam, marker, mate_markers);
         }
     }

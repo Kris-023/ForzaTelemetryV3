@@ -1272,8 +1272,40 @@ a tunnel they ran over the hill above it.
   exaggeration so the model is not stretched with the hills. *Why a minimum:* at HUD zoom (500 m) a
   real car is ~2 px; the flat arrow was 14 pt and the car must stay as readable (it is ~14 px tall at
   the HUD's 1x, seen at 40 deg). Zoomed in on the Viewer it is real size.
-- **Heading:** yaw only (telemetry yaw: forward = `(sin yaw, cos yaw)`); pitch and roll are left out
-  (scaled up 5-10x at HUD zoom a tilted car would look odd, and yaw is what the arrow showed).
+- **Heading:** yaw only by default (telemetry yaw: forward = `(sin yaw, cos yaw)`); pitch and roll
+  are left out (scaled up 5-10x at HUD zoom a tilted car would look odd, and yaw is what the arrow
+  showed). With **Car orientation** (D100, below) the full yaw / pitch / roll is used.
+- **Car orientation (D100):** `ReliefCfg::car_orientation` (bool, default **off**) draws the own car
+  *and* the teammates with the telemetry's yaw, pitch **and roll**, so on a slope the model sits
+  parallel to the road and in a corner it banks. Off = exactly the old yaw-only model.
+  - **Convention** (`marker::orientation`, mirrored by `MARKER_VS`'s `uRot`, a column-major `mat3`
+    of the world images of the model's right / up / forward axes): Forza's frames are left-handed
+    (x right, y up, z forward) with Unity-style angles, `R = Ry(yaw) * Rx(pitch) * Rz(roll)` (roll
+    about the car's forward axis first, then pitch about its right axis, then yaw about up). So
+    **positive pitch = nose down, positive roll = right side up**; a nose-up car reports a negative
+    pitch, a car leaning right (right side down) a negative roll. `pitch = roll = 0` is the yaw-only
+    basis exactly (tested). *Why these signs:* Forza's docs only say "radians". Evidence: a recorded
+    telemetry file of a car parked on a slope reports pitch -0.035 / roll -0.022 where the elevation
+    raster says the ground rises ahead and falls to the right (signs match, magnitudes are an 8 m
+    raster's roughness), and the Unity convention (which the yaw already follows) gives the same signs.
+    It was not verified against a real drive - if a car ever tilts the wrong way on a hill, flip the
+    sign of `pitch` / `roll` in `marker::orientation` (the one place), and its tests.
+  - **Pivot and sizing:** the model turns about its origin, the ground point under the telemetry
+    position (`GROUND_BELOW_M` below it). The model's height is divided by the exaggeration *after* the
+    turn, so a tilted model keeps its real angles under the hill exaggeration. The enlarged HUD model
+    (5-10x) swings correspondingly; it is drawn in the marker pass with no terrain depth test, so a
+    tilted end that dips "into" a hill is still whole and on top (checked at 33 deg pitch / 31 deg
+    roll and at 60 / 40 deg: the extreme test). The outline hull is the same model pushed out along
+    its smoothed normals before the same rotation, so it stays consistent. Shading follows the
+    rotated normals: a tilted top is lit a little darker than a flat one.
+  - **Data:** own car: the packet's `pitch` / `roll` (HUD: `snap.pkt`; Dashboard / Viewer:
+    `minimap_cached_pitch` / `minimap_cached_roll` next to the raw yaw). Teammates: `Remote::pitch` /
+    `roll` from their packets (they are full telemetry packets over co-op); a paused one keeps its last
+    known attitude with its last known height and position (HUD `CoopLayer::last_pos`, app
+    `CoopSeen`). `Marker3d` carries `pitch` / `roll`; the call sites pass 0 / 0 when the option is off,
+    `remote_markers_3d(.., orient, ..)` does the same for the teammates. Only 3D draws these models;
+    Flat / Tilted keep the flat arrows. *Why off by default:* it keeps today's look, and the enlarged
+    HUD model tilting is a visible change the user should opt into.
 - **Tunnel visibility (the "it flies" bug):** the marker is **its own paint callback**
   (`gl3d::add_marker(painter, handle, MarkerScene)`), queued where the flat arrow was drawn - after
   the race lines and POIs, one callback for the own car and all teammates (D89) - rendered into the renderer's FBO with a depth buffer of its
@@ -1329,7 +1361,9 @@ a tunnel they ran over the hill above it.
 - **Config (D78):** `ReliefCfg::marker: MarkerStyle { Arrow (default), Sedan }` (`serde(default)`,
   snake_case `"arrow"` / `"sedan"`), the **Car marker** row in the View mode card's 3D section, per map;
   "Copy to…" on that card copies it (it travels with `TiltCfg`). *Why Arrow by default:* it keeps
-  today's look until the user picks the car.
+  today's look until the user picks the car. D100 adds `ReliefCfg::car_orientation` (bool, default
+  false; a config from before has no key = off) as the **Car orientation** checkbox right under it,
+  same per-map storage and Copy-to path.
 
 Tests: `marker::tests` (model sizes and triangle counts, the transform: position / yaw / scale /
 exaggeration, the sizing rule, trail vertices carry the heights and the fade), the GL suite's
@@ -1344,6 +1378,17 @@ surface above it, Viewer + HUD 1x / 3x), `map_shared`'s `remote_markers_3d` unit
 test of D87's tunnel teammate: height, yaw, colour, paused grey, no height = terrain, none for flat /
 tilted, none off the map, no egui arrow with `flat_body = false` but the name and the pointer kept)
 and the HUD harness states `coop_sedan`, `coop_tunnel_sedan`, `coop_tunnel` (teammate pixels checked).
+D100: `marker::tests` (`orientation` is exactly the yaw-only basis at pitch = roll = 0; a nose-up
+(negative) pitch lifts the front vertex and a negative roll lowers the right side; proper rotation
+with the roll -> pitch -> yaw order; a car with the attitude of a slope sits parallel to it, uphill =
+nose up), `map_shared`'s `remote_markers_3d` test (option off = yaw only, on = the teammate's pitch /
+roll, a paused one's last known), `cfg` tests (default off, serde, an old config loads off, Copy-to
+carries it), the GL suite's `orientations` section (steepest hillside of the synthetic world, both
+kinds at HUD 1x / 3x and Viewer: the tilted own car and a banked teammate differ from the yaw-only
+frame, stay whole and outlined, cost no extra draw; an extreme 60 / 40 deg HUD sedan is still there),
+the real-install `real_install_car_orientation` (`#[ignore]`: the sedan on the steepest real road,
+`real_orient_*` PNGs) and the HUD harness states `hills_sedan_orient`, `hills_arrow_orient`,
+`coop_sedan_orient` (own car and teammates differ from the yaw-only states, bounded change).
 
 ### Anti-aliasing / shimmer (D98)
 

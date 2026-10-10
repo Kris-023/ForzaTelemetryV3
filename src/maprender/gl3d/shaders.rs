@@ -353,8 +353,8 @@ void main() {
 "#;
 
 /// The own-car marker (D77 / D78, `marker.rs`): a model in metres (x right, y up from its ground,
-/// z forward) placed at the telemetry position, turned by the yaw, scaled `uK.x`; heights are
-/// divided by the exaggeration so the model keeps its shape. `uK.y` > 0 = the outline hull,
+/// z forward) placed at the telemetry position, turned by the yaw / pitch / roll (`uRot`), scaled `uK.x`; heights
+/// are divided by the exaggeration (after the turn) so the model keeps its shape. `uK.y` > 0 = the outline hull,
 /// pushed out along the smoothed normal and drawn flat dark.
 pub const MARKER_VS: &str = r#"
 layout(location = 0) in vec3 aPos;
@@ -362,16 +362,15 @@ layout(location = 1) in vec3 aN;
 layout(location = 2) in vec3 aSm;
 layout(location = 3) in vec4 aMat;
 uniform vec3 uPos;       // the model's ground point: x, y (real metres), z
-uniform vec2 uYaw;       // sin, cos of the telemetry yaw
+uniform mat3 uRot;       // the car's orientation (columns: right, up, forward in the world; marker::orientation)
 uniform vec2 uK;         // model scale, outline push (metres; 0 = the model itself)
 out vec3 vN;
 out vec4 vMat;
 void main() {
   vec3 l = aPos * uK.x + aSm * uK.y;
-  vec3 r = vec3(uYaw.y, 0.0, -uYaw.x);
-  vec3 f = vec3(uYaw.x, 0.0, uYaw.y);
-  vec3 w = vec3(uPos.x + l.x * r.x + l.z * f.x, uPos.y + l.y / uExag, uPos.z + l.x * r.z + l.z * f.z);
-  vN = aN.x * r + vec3(0.0, aN.y, 0.0) + aN.z * f;
+  vec3 d = uRot * l;
+  vec3 w = vec3(uPos.x + d.x, uPos.y + d.y / uExag, uPos.z + d.z);
+  vN = uRot * aN;
   vMat = aMat;
   gl_Position = projectW(w);
 }
@@ -539,5 +538,5 @@ pub const ROAD_UNIFORMS: &[&str] = &[
     "uCasingAlpha", "uPass", "uVp", "uCut",
 ];
 pub const COMP_UNIFORMS: &[&str] = &["uTex", "uUv", "uSizePx", "uRadius", "uAlpha"];
-pub const MARKER_UNIFORMS: &[&str] = &["uVP", "uCar", "uExag", "uCam", "uPos", "uYaw", "uK", "uColor", "uHull", "uAlpha"];
+pub const MARKER_UNIFORMS: &[&str] = &["uVP", "uCar", "uExag", "uCam", "uPos", "uRot", "uK", "uColor", "uHull", "uAlpha"];
 pub const TRAIL_UNIFORMS: &[&str] = &["uVP", "uCar", "uExag", "uCam", "uH", "uHSize", "uHGeo", "uW", "uVp", "uColor", "uAlpha"];

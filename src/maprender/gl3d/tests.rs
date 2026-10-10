@@ -540,7 +540,98 @@ fn suite(flavour: Flavour, device: Option<usize>, tag: &str) {
     }
     markers(&mut rig, &w, &h, tex, tag);
     mates(&mut rig, &w, &h, tex, tag);
+    orientations(&mut rig, &w, &h, tex, tag);
     rig.finish(&h);
+}
+
+// ── the cars with the telemetry's full orientation (D100) ───────────────────────────────────
+
+/// The attitude (pitch, roll) a car heading `yaw` reports on the synthetic terrain at `(x, z)`:
+/// it sits parallel to the ground there.
+fn slope_attitude(t: &Terrain, x: f32, z: f32, yaw: f32) -> (f32, f32) {
+    let l = 3.0;
+    let (gx, gz) = ((t.height(x + l, z) - t.height(x - l, z)) / (2.0 * l), (t.height(x, z + l) - t.height(x, z - l)) / (2.0 * l));
+    let n = (gx * gx + 1.0 + gz * gz).sqrt();
+    marker::attitude_for_up(yaw, [-gx / n, 1.0 / n, -gz / n])
+}
+
+/// With the Car orientation option the cars are drawn at their pitch and roll: the own car on a
+/// slope sits parallel to it, a rolled teammate leans; each differs from the yaw-only model, stays
+/// whole (the colour is still there), and costs no extra draws. PNGs to look at (`*_orient_*`).
+fn orientations(rig: &mut Rig, w: &World, h: &Gl3dHandle, tex: MapTex, tag: &str) {
+    let t = w.terrain.clone();
+    let ground = |x: f32, z: f32| t.height(x, z) + 0.45;
+    // The steepest spot of the synthetic hills (a hillside, gradient found on a coarse grid), the car
+    // heading across it at 0.6 rad.
+    let yaw = 0.6f32;
+    let mut car = (0.0f32, 0.0f32);
+    let mut best = 0.0f32;
+    for i in -25..=25 {
+        for j in -25..=25 {
+            let (x, z) = (i as f32 * 20.0, j as f32 * 20.0);
+            let (p, r) = slope_attitude(&t, x, z, yaw);
+            if p.abs() + r.abs() > best {
+                (best, car) = (p.abs() + r.abs(), (x, z));
+            }
+        }
+    }
+    let (pitch, roll) = slope_attitude(&t, car.0, car.1, yaw);
+    eprintln!("[{tag}] slope attitude at {car:?}: pitch {:.1} deg, roll {:.1} deg", pitch.to_degrees(), roll.to_degrees());
+    assert!(pitch.abs().max(roll.abs()) > 0.12, "the hill spot is a real slope ({pitch}, {roll})");
+    let diff = |a: &Out, b: &Out| a.px.chunks(4).zip(b.px.chunks(4)).filter(|(p, q)| p.iter().zip(q.iter()).any(|(x, y)| x.abs_diff(*y) > 12)).count();
+    for kind in [MarkerStyle::Arrow, MarkerStyle::Sedan] {
+        let k = if kind == MarkerStyle::Arrow { "arrow" } else { "sedan" };
+        for (site, ppp, zoom) in [("hud", 1.0f32, 500.0f32), ("hud", 3.0, 500.0), ("viewer", 1.0, 60.0)] {
+            let own = |pitch: f32, roll: f32| Marker3d { pos: [car.0, ground(car.0, car.1), car.1], yaw, pitch, roll, kind, colour: CAR };
+            // A teammate on the far slope, rolled hard (a banked corner).
+            let (mx, mz) = if site == "hud" { (car.0 + 45.0, car.1 + 30.0) } else { (car.0 + 12.0, car.1 + 7.0) };
+            let mate = |pitch: f32, roll: f32| Marker3d { pos: [mx, ground(mx, mz), mz], yaw: 2.0, pitch, roll, kind, colour: MATE_A };
+            let view = |own: Marker3d, mates: Vec<Marker3d>| {
+                let base = if site == "hud" { View::hud() } else { View::dashboard() };
+                View { marker: Some(own), mates, car, yaw: 0.35, zoom, angle: if site == "hud" { 40.0 } else { 50.0 }, car_y: Some(own.pos[1] + 1.0), ..base }
+            };
+            let flat = view(own(0.0, 0.0), vec![mate(0.0, 0.0)]);
+            warm_up(rig, w, h, tex, &flat, ppp);
+            let o_flat = map_frame(rig, w, h, tex, &flat, ppp, &|_| {});
+            let draws_flat = h.stats().last.draws;
+            let tilted = view(own(pitch, roll), vec![mate(-0.3, 0.7)]);
+            let o = map_frame(rig, w, h, tex, &tilted, ppp, &|_| {});
+            let draws = h.stats().last.draws;
+            assert_eq!(o.gl_error, 0, "[{tag}] orient {k} {site} x{ppp}: GL error 0x{:X}", o.gl_error);
+            assert!(o.fbo_restored);
+            o.save(&format!("{tag}_orient_{k}_{site}_x{ppp}.png"));
+            o_flat.save(&format!("{tag}_orient_{k}_{site}_x{ppp}_yawonly.png"));
+            assert_eq!(draws, draws_flat, "[{tag}] orient {k} {site}: no extra draw calls");
+            let d = diff(&o, &o_flat);
+            eprintln!("[{tag}] orient {k} {site} x{ppp}: {d} px differ from the yaw-only frame");
+            assert!(d > (6.0 * ppp * ppp) as usize, "[{tag}] orient {k} {site} x{ppp}: the tilted cars look like the yaw-only ones ({d} px)");
+            // Whole and in place: the own car's colour is still enough around its point, with the outline.
+            let cam = camera(w, &tilted);
+            for (name, m, c, r) in [("own", own(pitch, roll), CAR, 26.0f32), ("mate", mate(-0.3, 0.7), MATE_A, 40.0)] {
+                let (at, _) = cam.project3(m.pos[0], m.pos[1], m.pos[2]).expect("in front");
+                let b = [((at.x - r) * ppp).max(0.0) as usize, ((at.y - r) * ppp).max(0.0) as usize, ((at.x + r) * ppp) as usize, ((at.y + r) * ppp) as usize];
+                let n = o.count_near(b, [c.r(), c.g(), c.b()], 70);
+                let before = o_flat.count_near(b, [c.r(), c.g(), c.b()], 70);
+                eprintln!("[{tag}] orient {k} {site} x{ppp} {name}: {n} px of its colour ({before} yaw-only)");
+                // (a teammate banked 40 degrees is seen nearly edge-on from the camera: fewer pixels, not none)
+                assert!(n >= (5.0 * ppp * ppp) as usize && n * 6 >= before, "[{tag}] orient {k} {site} x{ppp} {name}: only {n} px (yaw-only {before}) - clipped or hidden?");
+                assert!(o.count_near(b, [5, 6, 9], 40) > 0, "[{tag}] orient {k} {site} x{ppp} {name}: no outline");
+            }
+        }
+    }
+    // The extreme: the enlarged HUD sedan pitched 60 degrees and rolled 40: still whole.
+    let steep = Marker3d { pos: [car.0, ground(car.0, car.1), car.1], yaw, pitch: -1.05, roll: -0.7, kind: MarkerStyle::Sedan, colour: CAR };
+    let v = View { marker: Some(steep), car, yaw: 0.35, car_y: Some(steep.pos[1] + 1.0), ..View::hud() };
+    warm_up(rig, w, h, tex, &v, 1.0);
+    let o = map_frame(rig, w, h, tex, &v, 1.0, &|_| {});
+    assert_eq!(o.gl_error, 0, "[{tag}] steep sedan: GL error 0x{:X}", o.gl_error);
+    o.save(&format!("{tag}_orient_extreme_hud.png"));
+    let cam = camera(w, &v);
+    let (at, _) = cam.project3(car.0, steep.pos[1], car.1).expect("in front");
+    let b = [(at.x - 40.0).max(0.0) as usize, (at.y - 40.0).max(0.0) as usize, (at.x + 40.0) as usize, (at.y + 40.0) as usize];
+    // (seen from the side and shaded, the pink is darker: a wide tolerance, the terrain here is green / tan)
+    let n = o.count_near(b, [CAR.r(), CAR.g(), CAR.b()], 170);
+    assert!(n >= 12, "[{tag}] the steeply tilted HUD sedan is still there ({n} px)");
 }
 
 // ── the own car and the trails in the scene (D77 / D78) ─────────────────────────────────────
@@ -582,7 +673,7 @@ fn markers(rig: &mut Rig, w: &World, h: &Gl3dHandle, tex: MapTex, tag: &str) {
             let k = if kind == MarkerStyle::Arrow { "arrow" } else { "sedan" };
             for (site, ppp, zoom) in [("hud", 1.0f32, 500.0f32), ("hud", 3.0, 500.0), ("viewer", 1.0, 120.0)] {
                 let base = if site == "hud" { View::hud() } else { View { zoom, ..View::dashboard() } };
-                let mk = Marker3d { pos: [car.0, *y, car.1], yaw: *yaw, kind, colour: CAR };
+                let mk = Marker3d { pos: [car.0, *y, car.1], yaw: *yaw, pitch: 0.0, roll: 0.0, kind, colour: CAR };
                 let v = View { marker: Some(mk), car: *car, yaw: *view_yaw, zoom, angle: if site == "hud" { 40.0 } else { 50.0 }, car_y: Some(y + 1.0), ..base };
                 let with = |s: &mut Scene3d| s.trails = vec![tr.clone()];
                 warm_up(rig, w, h, tex, &v, ppp);
@@ -615,7 +706,7 @@ fn markers(rig: &mut Rig, w: &World, h: &Gl3dHandle, tex: MapTex, tag: &str) {
         }
     }
     // The model on screen at HUD size: about the minimum length (20 pt for the sedan at x1).
-    let mk = Marker3d { pos: [-60.0, ground(-60.0, -160.0), -160.0], yaw: 0.0, kind: MarkerStyle::Sedan, colour: CAR };
+    let mk = Marker3d { pos: [-60.0, ground(-60.0, -160.0), -160.0], yaw: 0.0, pitch: 0.0, roll: 0.0, kind: MarkerStyle::Sedan, colour: CAR };
     let v = View { car: (-60.0, -160.0), yaw: 0.0, car_y: Some(ground(-60.0, -160.0) + 1.0), marker: Some(mk), ..View::hud() };
     let o = map_frame(rig, w, h, tex, &v, 1.0, &|_| {});
     let (mut y0, mut y1) = (usize::MAX, 0);
@@ -657,9 +748,9 @@ fn mates(rig: &mut Rig, w: &World, h: &Gl3dHandle, tex: MapTex, tag: &str) {
     for kind in [MarkerStyle::Arrow, MarkerStyle::Sedan] {
         let k = if kind == MarkerStyle::Arrow { "arrow" } else { "sedan" };
         let car = (-60.0f32, -160.0f32);
-        let own = Marker3d { pos: [car.0, ground(car.0, car.1), car.1], yaw: 0.6, kind, colour: CAR };
-        let a = Marker3d { pos: [car.0 + 45.0, ground(car.0 + 45.0, car.1 + 30.0), car.1 + 30.0], yaw: 2.0, kind, colour: MATE_A };
-        let b = Marker3d { pos: [car.0 - 50.0, ground(car.0 - 50.0, car.1 - 40.0), car.1 - 40.0], yaw: 4.0, kind, colour: MATE_B };
+        let own = Marker3d { pos: [car.0, ground(car.0, car.1), car.1], yaw: 0.6, pitch: 0.0, roll: 0.0, kind, colour: CAR };
+        let a = Marker3d { pos: [car.0 + 45.0, ground(car.0 + 45.0, car.1 + 30.0), car.1 + 30.0], yaw: 2.0, pitch: 0.0, roll: 0.0, kind, colour: MATE_A };
+        let b = Marker3d { pos: [car.0 - 50.0, ground(car.0 - 50.0, car.1 - 40.0), car.1 - 40.0], yaw: 4.0, pitch: 0.0, roll: 0.0, kind, colour: MATE_B };
         let solo = mate_view(car, own, vec![]);
         warm_up(rig, w, h, tex, &solo, 1.0);
         let o0 = map_frame(rig, w, h, tex, &solo, 1.0, &|_| {});
@@ -696,8 +787,8 @@ fn mates(rig: &mut Rig, w: &World, h: &Gl3dHandle, tex: MapTex, tag: &str) {
     for (site, ppp, zoom) in [("viewer", 1.0f32, 70.0f32), ("hud", 1.0, 500.0), ("hud", 3.0, 500.0)] {
         // The own car is in the tunnel too, behind the teammate (the camera follows its height).
         let car = (tx - if site == "hud" { 120.0 } else { 40.0 }, tz);
-        let own = Marker3d { pos: [car.0, ty, car.1], yaw: std::f32::consts::FRAC_PI_2, kind: MarkerStyle::Sedan, colour: CAR };
-        let mate = Marker3d { pos: [tx, ty, tz], yaw: std::f32::consts::FRAC_PI_2, kind: MarkerStyle::Sedan, colour: MATE_A };
+        let own = Marker3d { pos: [car.0, ty, car.1], yaw: std::f32::consts::FRAC_PI_2, pitch: 0.0, roll: 0.0, kind: MarkerStyle::Sedan, colour: CAR };
+        let mate = Marker3d { pos: [tx, ty, tz], yaw: std::f32::consts::FRAC_PI_2, pitch: 0.0, roll: 0.0, kind: MarkerStyle::Sedan, colour: MATE_A };
         let view = |mates: Vec<Marker3d>| View { marker: Some(own), mates, car, yaw: 0.35, zoom, angle: if site == "hud" { 40.0 } else { 50.0 }, car_y: Some(own.pos[1] + 1.0), ..if site == "hud" { View::hud() } else { View::dashboard() } };
         let v = view(vec![mate]);
         warm_up(rig, w, h, tex, &v, ppp);
@@ -1899,6 +1990,58 @@ fn gl3d_real_install_scenes() {
     rig.finish(&h);
 }
 
+/// D100 on the real island: the sedan on the steepest stretch of a real road (grade up to 30 %, from
+/// the road's node heights) with the attitude of that slope - pitch only, no bank - seen from behind
+/// and from both sides, at the Viewer's size and the HUD's. PNGs to look at (`real_orient_*`): the
+/// car should sit parallel to the road, nose up going uphill.
+#[test]
+#[ignore = "needs an EGL device and an FH6 install; writes PNGs"]
+fn real_install_car_orientation() {
+    let Some(w) = real_world() else {
+        eprintln!("SKIP real_install_car_orientation: no FH6 install");
+        return;
+    };
+    let Some(mut rig) = open(Flavour::Default, None, [1300, 760]) else { return };
+    let (_hold, tex) = rig.load_map(&w, crate::minimap::OVERLAY_MAP_TEXTURE_OPTIONS);
+    // The steepest 20-80 m stretch with a grade of at most 30 % on a plain road: (grade, midpoint, heading uphill, height).
+    let mut best: Option<(f32, [f32; 2], f32, f32)> = None;
+    for ch in &w.layers.roads.by_type[RoadType::Road.index() as usize] {
+        for i in 0..ch.pts.len().saturating_sub(1) {
+            let (a, b) = (ch.pts[i], ch.pts[i + 1]);
+            let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
+            let len = dx.hypot(dz);
+            if !(20.0..80.0).contains(&len) {
+                continue;
+            }
+            let grade = (ch.y[i + 1] - ch.y[i]) / len;
+            if grade.abs() < 0.3 && best.is_none_or(|bst| grade.abs() > bst.0) {
+                let (sx, sz) = if grade > 0.0 { (dx, dz) } else { (-dx, -dz) };
+                best = Some((grade.abs(), [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0], sx.atan2(sz), (ch.y[i] + ch.y[i + 1]) / 2.0));
+            }
+        }
+    }
+    let (grade, mid, yaw, y) = best.expect("a sloped road");
+    let n = (1.0 + grade * grade).sqrt();
+    let (pitch, roll) = marker::attitude_for_up(yaw, [-grade * yaw.sin() / n, 1.0 / n, -grade * yaw.cos() / n]);
+    eprintln!("real slope: grade {:.0} % at ({:.0}, {:.0}), heading {:.2} rad, road height {y:.1} -> pitch {:.1} deg, roll {:.1} deg", grade * 100.0, mid[0], mid[1], yaw, pitch.to_degrees(), roll.to_degrees());
+    assert!(pitch < -0.05 && roll.abs() < 1e-4, "uphill = nose up = negative pitch, no bank");
+    let h = Gl3dHandle::with_options(Gl3dOptions { guard: None, sync_timing: true, ..Default::default() });
+    for (site, zoom, ppp) in [("viewer", 14.0f32, 2.0f32), ("hud", 150.0, 3.0)] {
+        for (side, view_yaw) in [("behind", yaw), ("left", yaw + std::f32::consts::FRAC_PI_2), ("right", yaw - std::f32::consts::FRAC_PI_2)] {
+            for (label, (p, r)) in [("flat", (0.0, 0.0)), ("orient", (pitch, roll))] {
+                let mk = Marker3d { pos: [mid[0], y + 0.45, mid[1]], yaw, pitch: p, roll: r, kind: MarkerStyle::Sedan, colour: CAR };
+                let base = if site == "hud" { View::hud() } else { View { angle: 12.0, ..View::dashboard() } };
+                let v = View { marker: Some(mk), car: (mid[0], mid[1]), yaw: view_yaw, zoom, car_y: Some(y + 1.0), ..base };
+                warm_up(&mut rig, &w, &h, tex, &v, ppp);
+                let o = map_frame(&mut rig, &w, &h, tex, &v, ppp, &|_| {});
+                assert_eq!(o.gl_error, 0, "real orient {site} {side} {label}: GL error 0x{:X}", o.gl_error);
+                o.save(&format!("real_orient_{site}_{side}_{label}.png"));
+            }
+        }
+    }
+    rig.finish(&h);
+}
+
 // ── road joins (D81): close-ups of real junctions, 2D and 3D ─────────────────────────────────
 
 /// Real road nodes worth a close look at the join geometry: `(name, x, z, y)`. Found from the chain
@@ -2845,7 +2988,7 @@ fn synthetic_shimmer_scenes(w: &World) -> Vec<(&'static str, View, f32, usize)> 
     let car = |kind: MarkerStyle| {
         let mut v = hud(150.0);
         let c = v.car;
-        v.marker = Some(Marker3d { pos: [c.0, t.height(c.0, c.1), c.1], yaw: 0.6, kind, colour: CAR });
+        v.marker = Some(Marker3d { pos: [c.0, t.height(c.0, c.1), c.1], yaw: 0.6, pitch: 0.0, roll: 0.0, kind, colour: CAR });
         v
     };
     vec![
