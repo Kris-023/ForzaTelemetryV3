@@ -1,98 +1,132 @@
-//! The race lines' start / finish marks in the 3D scene (D88): posts standing on the line at its
-//! own height, drawn with the trail ribbon program, **depth-tested** so terrain and decks hide
-//! them like the roads (the 2D marks were egui shapes over the picture and showed through hills).
+//! The race lines' start / finish marks in the 3D scene (D88, D102): a flat bar lying **across the
+//! race road** at the line's own height, like the paint of a start / finish line, **depth-tested**
+//! so terrain and decks hide it like the roads (the 2D marks were egui shapes over the picture
+//! and showed through hills).
 //!
-//! * a sprint's start: a green post with a dark outline (the 2D green dot);
-//! * a circuit's start and a sprint's finish: a chequered post (white / black cells, the 2D flag).
+//! * a sprint's start: a green bar with a dark outline (the 2D green dot's colours);
+//! * a circuit's start and a sprint's finish: a chequered bar, two rows of white / dark cells
+//!   (the 2D flag).
 //!
-//! A post is a vertical ribbon of constant screen width ([`POST_PT`]) and a height that is
-//! [`POST_H_PT`] points *at the car's distance* (`height_m`, from the camera's scale), so it stays
-//! readable at every zoom and shrinks with the perspective like the icons. *Why posts and not
-//! flat bars across the road:* a bar lying on the road is a hairline from the tilted camera and
-//! has to be as wide as the road; the post is one ribbon per mark, a few vertices, and reads at
-//! any angle. Built per frame (the size follows the zoom): a few hundred marks in the worst case
-//! (`All`: 170 lines), ~30 vertices each.
+//! *Why a bar across the road, after posts (#231):* the posts stood upright and read as small
+//! things next to the road; the user expects the line a race has on the road ("the finish line is
+//! turned by 90 degrees, at least it isn't wide enough"). A flat quad is only a hairline from a
+//! very flat camera, but the 3D view is a map view (angle <= 75 deg), and the bar is the same
+//! few vertices.
+//!
+//! The geometry is **world-sized**, so a mark is one quad (6 vertices) of static data
+//! ([`vertices`]: the point, the race direction, the climb, the corner), and the vertex shader
+//! ([`shaders::MARK_VS`]) works out the size from the road's own width rule, the same as the race
+//! road's ribbon (`ROAD_VS`): the road's drawn width at that depth (the fill plus the casing) plus
+//! [`OVERHANG_PX`] each side, and a depth along the road of [`BAR_DEPTH_M`], at least
+//! [`MIN_DEPTH_PX`] on the screen so it does not vanish when zoomed out. The chequer is procedural
+//! in the fragment shader (cells of half the depth, filtered by `fwidth`, so cells under a pixel
+//! average to grey instead of shimmering).
+//!
+//! Built per frame (a few hundred marks in the worst case, `All`: 170 lines; ~60 floats a mark, a
+//! microsecond each) and streamed into one buffer; cheaper than keeping a cache coherent.
 //!
 //! Marks whose line height is 4 m or more under the terrain (a tunnel start) are drawn without
 //! the depth test, like the road tunnels, instead of being buried.
 
-use egui::Color32;
+use egui_glow::glow::{self, HasContext};
 
-use super::marker::{Trail3d, TrailSeg};
-use crate::maprender::mesh3d::{known_y, LIFT_M, RACE_TUNNEL_DEPTH_M};
+use crate::maprender::mesh3d::{known_y, RACE_TUNNEL_DEPTH_M};
 use crate::maprender::racesel::{MarkKind, RaceMark};
-use crate::maprender::style;
 use crate::maprender::terrain::Terrain;
 
-/// Post width (points, x the size factor) and the outline's.
-pub const POST_PT: f32 = 5.0;
-pub const OUTLINE_PT: f32 = 8.0;
-/// Post height in points at the car's distance (the 2D flag is 9 pt; a post is taller to read
-/// from an angle).
-pub const POST_H_PT: f32 = 18.0;
+/// The bar's depth along the road in metres (two rows of cells of half of it).
+pub const BAR_DEPTH_M: f32 = 4.0;
+/// ... and at least this many screen px (design px, x the size factor) deep: zoomed out, the
+/// bar is wider than 4 m of road is long.
+pub const MIN_DEPTH_PX: f32 = 8.0;
+/// The bar reaches this much beyond the road's casing on each side (design px).
+pub const OVERHANG_PX: f32 = 1.5;
+/// Floats per vertex: `aP` (3), `aD` (3), `aI` (4), `aKind` (1).
+pub const MARK_FLOATS: usize = 11;
 
-/// One batch of the post ribbons: all of one colour and width, drawn in one call.
-pub struct MarkBatch {
-    pub trail: Trail3d,
-    /// Ribbon width in points (before `s` x `ppp`).
-    pub width_pt: f32,
+/// The corners of the quad as two triangles: (across, along), each -1 or +1.
+const CORNERS: [[f32; 2]; 6] = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+
+/// Is mark `m` in a tunnel (4 m or more under the terrain, like the race road's tunnel stretches)?
+pub fn in_tunnel(m: &RaceMark, terrain: &Terrain) -> bool {
+    known_y(m.y).is_some_and(|y| terrain.height(m.at[0], m.at[1]) - y >= RACE_TUNNEL_DEPTH_M)
 }
 
-/// The posts of `marks` as ribbon batches, bottom layer first: `[dark outline of every post,
-/// sprint-start green, chequer white, chequer dark]`, for the posts in the open (`tunnel` false)
-/// or the ones in a tunnel (true). `height_m` = a post's real height, `exag` = the camera's
-/// exaggeration (the shader scales world heights by it; the post keeps its real height).
-pub fn batches(marks: &[RaceMark], terrain: &Terrain, height_m: f32, exag: f32, tunnel: bool) -> Vec<MarkBatch> {
-    let col = |c: Color32| Trail3d { segs: Vec::new(), colour: c };
-    let (mut outline, mut green, mut white, mut dark) = (col(style::START_DOT_OUTLINE), col(style::START_DOT), col(Color32::WHITE), col(Color32::from_gray(0x11)));
-    let h = height_m / exag.max(0.1);
-    for m in marks {
-        let ground = terrain.height(m.at[0], m.at[1]);
-        let y = known_y(m.y).unwrap_or(ground) + LIFT_M;
-        if (ground - y >= RACE_TUNNEL_DEPTH_M) != tunnel {
-            continue;
-        }
-        let seg = |a: f32, b: f32| TrailSeg { a: [m.at[0], y + h * a, m.at[1]], b: [m.at[0], y + h * b, m.at[1]], alpha: 1.0 };
-        outline.segs.push(seg(0.0, 1.0));
-        match m.kind {
-            MarkKind::SprintStart => green.segs.push(seg(0.0, 1.0)),
-            MarkKind::Chequered => {
-                // three cells from the top: white, dark, white (the 2D flag's corner cell is white)
-                white.segs.push(seg(2.0 / 3.0, 1.0));
-                dark.segs.push(seg(1.0 / 3.0, 2.0 / 3.0));
-                white.segs.push(seg(0.0, 1.0 / 3.0));
-            }
+/// The quads of the marks in the open (`tunnel` false) or in a tunnel (true), 6 vertices of
+/// [`MARK_FLOATS`] each: the point `x, y, z` (the line's height, or the ground's when unknown),
+/// the race direction `x, z` and climb, `[height known 1 / 0, inset, corner across, corner along]`,
+/// and the kind (0 = sprint start, 1 = chequered).
+pub fn vertices(marks: &[RaceMark], terrain: &Terrain, tunnel: bool) -> Vec<f32> {
+    let mut v = Vec::new();
+    for m in marks.iter().filter(|m| in_tunnel(m, terrain) == tunnel) {
+        let known = known_y(m.y);
+        let y = known.unwrap_or_else(|| terrain.height(m.at[0], m.at[1]));
+        let kind = (m.kind == MarkKind::Chequered) as u8 as f32;
+        for c in CORNERS {
+            v.extend([m.at[0], y, m.at[1], m.dir[0], m.dir[1], m.slope, known.is_some() as u8 as f32, m.inset, c[0], c[1], kind]);
         }
     }
-    let mut out = vec![MarkBatch { trail: outline, width_pt: OUTLINE_PT }];
-    out.extend([green, white, dark].map(|trail| MarkBatch { trail, width_pt: POST_PT }));
-    out.retain(|b| !b.trail.segs.is_empty());
-    out
+    v
+}
+
+/// The streamed vertex buffer of the marks.
+pub struct MarkGpu {
+    pub vao: glow::VertexArray,
+    pub vbo: glow::Buffer,
+}
+
+impl MarkGpu {
+    pub fn new(gl: &glow::Context) -> Result<MarkGpu, String> {
+        // SAFETY: plain buffer setup on the current context.
+        unsafe {
+            let vao = gl.create_vertex_array()?;
+            gl.bind_vertex_array(Some(vao));
+            let vbo = gl.create_buffer()?;
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            let stride = (MARK_FLOATS * 4) as i32;
+            for (loc, n, off) in [(0u32, 3, 0), (1, 3, 12), (2, 4, 24), (3, 1, 40)] {
+                gl.enable_vertex_attrib_array(loc);
+                gl.vertex_attrib_pointer_f32(loc, n, glow::FLOAT, false, stride, off);
+            }
+            gl.bind_vertex_array(None);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            Ok(MarkGpu { vao, vbo })
+        }
+    }
+
+    pub fn destroy(&self, gl: &glow::Context) {
+        // SAFETY: deleting objects this struct created.
+        unsafe {
+            gl.delete_vertex_array(self.vao);
+            gl.delete_buffer(self.vbo);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn mark(at: [f32; 2], y: f32, kind: MarkKind) -> RaceMark {
+        RaceMark { at, y, kind, dir: [1.0, 0.0], slope: 0.1, inset: 0.5 }
+    }
+
     #[test]
-    fn posts_stand_on_the_line_and_tunnel_posts_are_apart() {
+    fn marks_are_quads_and_tunnel_marks_are_apart() {
         let t = Terrain::synthetic();
         let g = t.height(0.0, 0.0);
-        let marks = [
-            RaceMark { at: [0.0, 0.0], y: g + 1.0, kind: MarkKind::SprintStart },
-            RaceMark { at: [0.0, 0.0], y: 0.0, kind: MarkKind::Chequered },
-            RaceMark { at: [0.0, 0.0], y: g - 10.0, kind: MarkKind::Chequered },
-        ];
-        let open = batches(&marks, &t, 20.0, 2.0, false);
-        let under = batches(&marks, &t, 20.0, 2.0, true);
-        // outline (2 posts), green (1), chequer white (2 cells), dark (1 cell)
-        let n: Vec<usize> = open.iter().map(|b| b.trail.segs.len()).collect();
-        assert_eq!(n, vec![2, 1, 2, 1]);
-        assert_eq!(under.iter().map(|b| b.trail.segs.len()).collect::<Vec<_>>(), vec![1, 2, 1]);
-        // the sprint post: from the line (+ the road lift) up by the real height / exaggeration
-        let s = open[1].trail.segs[0];
-        assert!((s.a[1] - (g + 1.0 + LIFT_M)).abs() < 1e-4 && (s.b[1] - s.a[1] - 10.0).abs() < 1e-4, "{s:?}");
-        // an unknown height (0) takes the terrain
-        assert!((open[0].trail.segs[1].a[1] - (g + LIFT_M)).abs() < 1e-4);
+        let marks = [mark([0.0, 0.0], g + 1.0, MarkKind::SprintStart), mark([0.0, 0.0], 0.0, MarkKind::Chequered), mark([0.0, 0.0], g - 10.0, MarkKind::Chequered)];
+        let open = vertices(&marks, &t, false);
+        let under = vertices(&marks, &t, true);
+        assert_eq!(open.len(), 2 * 6 * MARK_FLOATS, "two quads in the open");
+        assert_eq!(under.len(), 6 * MARK_FLOATS, "one in the tunnel");
+        // the sprint start: the line's height, known, kind 0; the corners are the four of a quad
+        let v = &open[..MARK_FLOATS];
+        assert_eq!((v[1], v[6], v[10]), (g + 1.0, 1.0, 0.0));
+        let corners: std::collections::BTreeSet<(i32, i32)> = open[..6 * MARK_FLOATS].chunks(MARK_FLOATS).map(|v| (v[8] as i32, v[9] as i32)).collect();
+        assert_eq!(corners.len(), 4);
+        // an unknown height (0) takes the terrain and says so
+        let v = &open[6 * MARK_FLOATS..7 * MARK_FLOATS];
+        assert_eq!((v[1], v[6], v[10]), (g, 0.0, 1.0));
     }
 }

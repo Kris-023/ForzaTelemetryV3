@@ -227,10 +227,14 @@ pub struct Gl3d {
     comp: Prog,
     marker: Prog,
     trail: Prog,
+    /// The race lines' start / finish bars (D102, `racemark`).
+    mark: Prog,
     /// The arrow and the sedan (`MarkerStyle` order), uploaded at the first marker.
     models: Option<[ModelGpu; 2]>,
     /// The streamed trail buffer, created at the first trail.
     trail_buf: Option<TrailGpu>,
+    /// The streamed buffer of the start / finish bars, created at the first mark.
+    mark_buf: Option<racemark::MarkGpu>,
     clip: Clipmap,
     pub heights: Option<HeightTex>,
     pub roads: Option<RoadGpu>,
@@ -265,6 +269,7 @@ impl Gl3d {
         let comp = compile(gl, "composite", shaders::COMP_VS, shaders::COMP_FS, Common::No, shaders::COMP_UNIFORMS)?;
         let marker = compile(gl, "marker", shaders::MARKER_VS, shaders::MARKER_FS, Common::Yes, shaders::MARKER_UNIFORMS)?;
         let trail = compile(gl, "trail", shaders::TRAIL_VS, shaders::TRAIL_FS, Common::Yes, shaders::TRAIL_UNIFORMS)?;
+        let mark = compile(gl, "racemark", shaders::MARK_VS, shaders::MARK_FS, Common::Yes, shaders::MARK_UNIFORMS)?;
         let clip = Clipmap::new(gl)?;
         // SAFETY: plain GL object creation on the current context.
         let (empty_vao, queries) = unsafe {
@@ -273,7 +278,7 @@ impl Gl3d {
             (v, q)
         };
         let n = queries.len();
-        Ok(Gl3d { caps, terrain, road, comp, marker, trail, models: None, trail_buf: None, clip, heights: None, roads: None, race: None, nav: None, fbo: None, empty_vao, queries, q_inflight: vec![false; n], q_next: 0, map_prepared: None, cull: opts.cull, msaa: opts.msaa, destroyed: false })
+        Ok(Gl3d { caps, terrain, road, comp, marker, trail, mark, models: None, trail_buf: None, mark_buf: None, clip, heights: None, roads: None, race: None, nav: None, fbo: None, empty_vao, queries, q_inflight: vec![false; n], q_next: 0, map_prepared: None, cull: opts.cull, msaa: opts.msaa, destroyed: false })
     }
 
     /// Upload the height raster (15 MB for the island, ~16 ms).
@@ -694,7 +699,7 @@ impl Gl3d {
                     self.draw_roads(gl, f, &heights, &table, r, Some((RACE_BIAS, deck)), NO_CUT, &mut st);
                 }
                 if rf.cfg.marks && !rf.marks.is_empty() {
-                    self.draw_race_marks(gl, f, &heights, rf.marks, &mut st)?;
+                    self.draw_race_marks(gl, f, &heights, &rf, &mut st)?;
                 }
             }
             // ── the navigation route (phase L, D84): over the roads and the race lines, depth-tested
@@ -853,38 +858,48 @@ impl Gl3d {
         }
     }
 
-    /// The race lines' start / finish posts (D88, `racemark`): ribbons of the trail program,
-    /// depth-tested against the terrain, the roads and the race mesh, so a hill hides them (no
-    /// ghost pass: unlike a trail they are not "seen through"); the ones in a tunnel go last
-    /// without the depth test, like the road tunnels.
+    /// The race lines' start / finish bars (D88, D102, `racemark`): a quad across the race road per
+    /// mark, sized in the vertex shader by the race road's own width rule (so it spans the drawn
+    /// road), depth-tested against the terrain, the roads and the race mesh, so a hill hides it (no
+    /// ghost pass: unlike a trail it is not "seen through"); the ones in a tunnel go last without
+    /// the depth test, like the road tunnels.
     ///
     /// # Safety
     /// The scene FBO is bound with depth testing on; a current context.
-    unsafe fn draw_race_marks(&mut self, gl: &glow::Context, f: &Frame, heights: &HeightTex, marks: &[RaceMark], st: &mut RenderStats) -> Result<(), String> {
+    unsafe fn draw_race_marks(&mut self, gl: &glow::Context, f: &Frame, heights: &HeightTex, rf: &RaceFrame, st: &mut RenderStats) -> Result<(), String> {
         let Some(relief) = f.cam.relief.as_ref() else { return Ok(()) };
-        // a post's real height: POST_H_PT points at the car's distance
-        let height_m = racemark::POST_H_PT * f.s / f.cam.view.scale.max(1e-6);
-        if self.trail_buf.is_none() {
-            self.trail_buf = Some(TrailGpu::new(gl)?);
+        if self.mark_buf.is_none() {
+            self.mark_buf = Some(racemark::MarkGpu::new(gl)?);
         }
-        let tb = self.trail_buf.as_ref().expect("created above");
+        let mb = self.mark_buf.as_ref().expect("created above");
+        // the race road's width: the roads' rule x the race factor, plus its casing when cased
+        // (the same table the race mesh is drawn with)
+        let table = roads::race_table(rf.roads, rf.cfg, f.cam.view.scale, f.s, f.ppp);
+        let slot = crate::maprender::mesh3d::SLOT_RACE as usize;
+        let px = f.s * f.ppp;
+        let col = |c: egui::Color32| [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0];
+        let cols: Vec<f32> = [egui::Color32::WHITE, egui::Color32::from_gray(0x11), style::START_DOT, style::START_DOT_OUTLINE].into_iter().flat_map(col).collect();
         // SAFETY: the caller's contract.
         unsafe {
-            let p = &self.trail;
+            let p = &self.mark;
             gl.use_program(Some(p.p));
             self.camera_uniforms(gl, p, f, heights);
+            gl.uniform_4_f32(p.u("uRW"), table.rw[0], table.rw[1], table.rw[2], table.rw[3]);
+            gl.uniform_2_f32(p.u("uRoad"), table.b[slot][3], table.c[slot][2]);
+            gl.uniform_4_f32(p.u("uMark"), racemark::BAR_DEPTH_M, racemark::MIN_DEPTH_PX * px, racemark::OVERHANG_PX * px, RACE_BIAS_MARK);
             gl.uniform_2_f32(p.u("uVp"), f.size[0] as f32, f.size[1] as f32);
-            gl.uniform_1_f32(p.u("uAlpha"), 1.0);
+            gl.uniform_1_f32(p.u("uLift"), LIFT_M);
+            gl.uniform_3_f32_slice(p.u("uCols"), &cols);
             gl.enable(glow::BLEND);
             gl.blend_equation_separate(glow::FUNC_ADD, glow::FUNC_ADD);
             gl.blend_func_separate(glow::ONE, glow::ONE_MINUS_SRC_ALPHA, glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
             gl.disable(glow::CULL_FACE);
             gl.depth_mask(false);
             gl.depth_func(glow::LEQUAL);
-            gl.bind_vertex_array(Some(tb.vao));
+            gl.bind_vertex_array(Some(mb.vao));
             for tunnel in [false, true] {
-                let batches = racemark::batches(marks, &relief.terrain, height_m, relief.exag, tunnel);
-                if batches.is_empty() {
+                let v = racemark::vertices(rf.marks, &relief.terrain, tunnel);
+                if v.is_empty() {
                     continue;
                 }
                 if tunnel {
@@ -892,18 +907,12 @@ impl Gl3d {
                 } else {
                     gl.enable(glow::DEPTH_TEST);
                 }
-                for b in &batches {
-                    let (v, _) = marker::trail_vertices(std::slice::from_ref(&b.trail));
-                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(tb.vbo));
-                    gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, super::as_bytes(&v), glow::STREAM_DRAW);
-                    gl.uniform_2_f32(p.u("uW"), b.width_pt * f.s * f.ppp, RACE_BIAS_MARK);
-                    let c = b.trail.colour;
-                    gl.uniform_3_f32(p.u("uColor"), c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0);
-                    let n = (v.len() / marker::TRAIL_FLOATS) as i32;
-                    gl.draw_arrays(glow::TRIANGLES, 0, n);
-                    st.triangles += n as usize / 3;
-                    st.draws += 1;
-                }
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(mb.vbo));
+                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, super::as_bytes(&v), glow::STREAM_DRAW);
+                let n = (v.len() / racemark::MARK_FLOATS) as i32;
+                gl.draw_arrays(glow::TRIANGLES, 0, n);
+                st.triangles += n as usize / 3;
+                st.draws += 1;
             }
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
             gl.enable(glow::DEPTH_TEST);
@@ -1090,7 +1099,7 @@ impl Gl3d {
         self.destroyed = true;
         // SAFETY: deleting objects this struct created, on their context.
         unsafe {
-            for p in [&self.terrain, &self.road, &self.comp, &self.marker, &self.trail] {
+            for p in [&self.terrain, &self.road, &self.comp, &self.marker, &self.trail, &self.mark] {
                 gl.delete_program(p.p);
             }
             gl.delete_vertex_array(self.empty_vao);
@@ -1104,6 +1113,9 @@ impl Gl3d {
         self.clip.destroy(gl);
         for m in self.models.take().into_iter().flatten() {
             m.destroy(gl);
+        }
+        if let Some(t) = self.mark_buf.take() {
+            t.destroy(gl);
         }
         if let Some(t) = self.trail_buf.take() {
             t.destroy(gl);
@@ -1153,5 +1165,5 @@ const RACE_BIAS_FILL: f32 = 0.00008;
 /// The navigation route (phase L) lies over the race road and the roads, under the trails (0.0044):
 /// its casing a step nearer than the race fill (0.00428), its fill (+ `RACE_BIAS_FILL`) at 0.00438.
 const NAV_BIAS: f32 = 0.0043;
-/// The start / finish posts stand on the race road: a little nearer than its fill.
+/// The start / finish bars lie on the race road: a little nearer than its fill.
 const RACE_BIAS_MARK: f32 = 0.0045;
