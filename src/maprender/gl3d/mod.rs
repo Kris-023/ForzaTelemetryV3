@@ -9,7 +9,7 @@
 //! clipmap   terrain: 7-level geometry clipmap, R16UI height texture
 //! roads     road buffers, the per-frame draw plan (tiles, LOD sets), the style table
 //! marker    the car markers - own car and co-op teammates (3D arrow / low-poly sedan) - and the trail ribbons (D77 / D78 / D89)
-//! racemark  the race lines' start / finish posts (D88)
+//! racemark  the race lines' start / finish bars across the road (D88, D102)
 //! shaders   GLSL for desktop GL 3.3 core and OpenGL ES 3.0
 //! probe     what the context offers; the requirements
 //! ```

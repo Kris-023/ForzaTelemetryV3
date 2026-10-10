@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use egui::{pos2, vec2, Color32, ColorImage, Context, LayerId, Order, Rect, Stroke, StrokeKind, TextureOptions};
+use egui::{pos2, vec2, Color32, ColorImage, Context, LayerId, Order, Pos2, Rect, Stroke, StrokeKind, TextureOptions};
 use egui_glow::glow::{self, HasContext};
 
 use super::*;
@@ -1286,7 +1286,7 @@ fn gl3d_race_road_is_hidden_behind_hills() {
 /// hill hides it like the roads. Each case is seen from the far side of the hill (the control:
 /// drawn) and from the near side (hidden): the **Road** style of lines that are not the in-race
 /// focus (modes `nearest` / `near` / `all`: no focus at all here), the thin **Line** style (a
-/// ribbon of the configured width), and the start / finish **marks** (posts, a green one for a
+/// ribbon of the configured width), and the start / finish **marks** (bars across the road, a green one for a
 /// sprint's start). No roads are drawn, so only the race colour / the mark colour is counted.
 #[test]
 #[ignore = "needs an EGL device; writes PNGs (GL3D_PNG_DIR)"]
@@ -1305,7 +1305,7 @@ fn gl3d_race_lines_and_marks_are_hidden_behind_hills() {
         let y: Vec<f32> = pts.iter().map(|p| w.terrain.height(p[0], p[1]) + 0.3).collect();
         RaceRoad { pts, y, closed: false }
     };
-    let posts: Vec<RaceMark> = (0..5).map(|i| RaceMark { at: [-440.0 + 70.0 * i as f32, 440.0], y: w.terrain.height(-440.0 + 70.0 * i as f32, 440.0) + 0.3, kind: MarkKind::SprintStart }).collect();
+    let posts: Vec<RaceMark> = (0..5).map(|i| RaceMark { at: [-440.0 + 70.0 * i as f32, 440.0], y: w.terrain.height(-440.0 + 70.0 * i as f32, 440.0) + 0.3, kind: MarkKind::SprintStart, dir: [1.0, 0.0], slope: 0.0, inset: 0.0 }).collect();
     let base = RaceCfg::default();
     let mark_colour = crate::maprender::style::START_DOT.to_array();
     // (name, lines, marks, cfg, the colour that is counted)
@@ -1340,6 +1340,131 @@ fn gl3d_race_lines_and_marks_are_hidden_behind_hills() {
         }
         assert!(counts[0] > 100, "{name}: the control (plain view) is drawn ({counts:?})");
         assert!(counts[1] < 10, "{name}: hidden behind the hill ({counts:?})");
+    }
+    rig.finish(&Gl3dHandle::new());
+}
+
+/// The pixels in `r` within `tol` of `c` as screen points.
+fn pixels_near(o: &Out, r: [usize; 4], c: [u8; 3], tol: i32) -> Vec<(f32, f32)> {
+    let mut v = vec![];
+    for y in r[1]..r[3].min(o.h) {
+        for x in r[0]..r[2].min(o.w) {
+            let p = o.at(x, y);
+            if (0..3).map(|k| (p[k] as i32 - c[k] as i32).abs()).sum::<i32>() <= tol {
+                v.push((x as f32, y as f32));
+            }
+        }
+    }
+    v
+}
+
+/// The direction (radians, mod pi) of the long axis of a point cloud, and the ratio of the long to
+/// the short extent (the principal axes of the covariance).
+fn long_axis(p: &[(f32, f32)]) -> (f32, f32) {
+    let n = p.len() as f32;
+    let (mx, my) = (p.iter().map(|q| q.0).sum::<f32>() / n, p.iter().map(|q| q.1).sum::<f32>() / n);
+    let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+    for q in p {
+        let (dx, dy) = (q.0 - mx, q.1 - my);
+        sxx += dx * dx;
+        syy += dy * dy;
+        sxy += dx * dy;
+    }
+    let th = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+    let tr = sxx + syy;
+    let det = sxx * syy - sxy * sxy;
+    let disc = (tr * tr / 4.0 - det).max(0.0).sqrt();
+    let (l1, l2) = (tr / 2.0 + disc, (tr / 2.0 - disc).max(1e-6));
+    (th.rem_euclid(std::f32::consts::PI), (l1 / l2).sqrt())
+}
+
+/// The smallest angle (degrees, 0..=90) between two directions given mod pi.
+fn axis_gap_deg(a: f32, b: f32) -> f32 {
+    let d = (a - b).rem_euclid(std::f32::consts::PI);
+    d.min(std::f32::consts::PI - d).to_degrees()
+}
+
+/// D102: a start / finish mark is a bar **across** the race road: as wide as the drawn road
+/// (never narrower), its long axis the projection of the world perpendicular to the race direction
+/// (not along the road, and so turned by 90 degrees from a post's or a line's), at the road's height. The race
+/// road runs straight along x over flat ground; the sprint start (green) is measured, in a view
+/// that has the road horizontal on the screen (width) and in one that has it diagonal (angle), and
+/// at the Dashboard's and a zoomed-out zoom; the chequered bar must hold both its colours.
+#[test]
+#[ignore = "needs an EGL device; writes PNGs (GL3D_PNG_DIR)"]
+fn gl3d_race_marks_span_the_road_and_lie_across_it() {
+    use crate::maprender::cfg::RaceCfg;
+    let Some(mut rig) = open(Flavour::Default, None, [620, 420]) else { return };
+    let w = world();
+    let (_hold, tex) = rig.load_map(&w, TextureOptions::LINEAR);
+    let z = -700.0f32;
+    let pts: Vec<[f32; 2]> = (0..=30).map(|i| [-300.0 + 20.0 * i as f32, z]).collect();
+    let y: Vec<f32> = pts.iter().map(|p| w.terrain.height(p[0], z) + 0.3).collect();
+    let road = RaceRoad { pts, y, closed: false };
+    let mark = |kind| RaceMark { at: [0.0, z], y: w.terrain.height(0.0, z) + 0.3, kind, dir: [1.0, 0.0], slope: 0.0, inset: 0.0 };
+    let green = crate::maprender::style::START_DOT.to_array();
+    let green = [green[0], green[1], green[2]];
+    let cfg = RaceCfg::default();
+    let fill = cfg.color.0;
+    let full = [0, 0, 620, 420];
+    for (name, yaw, zoom) in [("flat_120m", 0.0f32, 120.0f32), ("diag_120m", 0.6, 120.0), ("flat_300m", 0.0, 300.0), ("diag_300m", 0.6, 300.0), ("flat_1500m", 0.0, 1500.0), ("diag_1500m", 0.6, 1500.0)] {
+        let mut v = View::dashboard();
+        v.no_3d = false;
+        v.car = (-80.0, z);
+        v.yaw = yaw;
+        v.zoom = zoom;
+        let h = Gl3dHandle::with_options(Gl3dOptions { guard: None, ..Default::default() });
+        let mut outs = vec![];
+        // the sprint start, the chequered bar, and the control without a mark (the road alone)
+        for kind in [Some(MarkKind::SprintStart), Some(MarkKind::Chequered), None] {
+            let r = race3d(&w, vec![road.clone()], kind.map(mark).into_iter().collect(), cfg);
+            let mut last = None;
+            for _ in 0..8 {
+                last = Some(map_frame(&mut rig, &w, &h, tex, &v, 1.0, &|s| {
+                    s.roads.on = false;
+                    s.roads.min_px = 8.0;
+                    s.roads.max_px = 40.0;
+                    s.race = Some(r.clone());
+                }));
+            }
+            let o = last.unwrap();
+            assert_eq!(o.gl_error, 0, "{name}");
+            o.save(&format!("racemark_{name}_{}.png", kind.map_or("none".into(), |k| format!("{k:?}"))));
+            outs.push(o);
+        }
+        let o = &outs[0];
+        let cam = camera(&w, &v);
+        let proj = |dx: f32, dz: f32| cam.project(dx, z + dz).expect("on the screen");
+        let c0 = proj(0.0, 0.0);
+        // the world perpendicular and the road, as they come out on the screen
+        let (to_across, to_along) = (proj(0.0, 10.0) - c0, proj(10.0, 0.0) - c0);
+        let (a_across, a_along) = (to_across.y.atan2(to_across.x).rem_euclid(std::f32::consts::PI), to_along.y.atan2(to_along.x).rem_euclid(std::f32::consts::PI));
+        let bar = pixels_near(o, full, green, 40);
+        assert!(bar.len() > 12, "{name}: the green bar is drawn ({} px)", bar.len());
+        let (a_bar, ratio) = long_axis(&bar);
+        eprintln!("{name}: bar {} px, long axis {:.1} deg (across {:.1}, along {:.1}), elongation {ratio:.1}", bar.len(), a_bar.to_degrees(), a_across.to_degrees(), a_along.to_degrees());
+        assert!(axis_gap_deg(a_bar, a_across) < if zoom > 1000.0 { 15.0 } else { 8.0 }, "{name}: the bar lies across the road ({:.1} vs {:.1} deg)", a_bar.to_degrees(), a_across.to_degrees());
+        assert!(axis_gap_deg(a_bar, a_along) > 25.0, "{name}: and not along it");
+        // its extent along the line across the road (a thin band through the point, along the
+        // projected perpendicular) against the road's fill on the same line in the control frame, without
+        // the bar
+        let (ux, uy) = (a_across.cos(), a_across.sin());
+        let span_at = |p: &[(f32, f32)], c: Pos2| {
+            let t: Vec<f32> = p.iter().filter(|q| ((q.0 - c.x) * uy - (q.1 - c.y) * ux).abs() <= 2.5).map(|q| (q.0 - c.x) * ux + (q.1 - c.y) * uy).collect();
+            assert!(t.len() > 3, "{name}: pixels on the line across ({})", t.len());
+            t.iter().cloned().fold(f32::MIN, f32::max) - t.iter().cloned().fold(f32::MAX, f32::min) + 1.0
+        };
+        let road_px = pixels_near(&outs[2], full, fill, 40);
+        let (bar_w, road_w) = (span_at(&bar, c0), span_at(&road_px, c0));
+        eprintln!("{name}: across the road the bar is {bar_w:.1} px, the road's fill {road_w:.1} px");
+        assert!(bar_w >= road_w, "{name}: the bar spans the road ({bar_w:.1} px < {road_w:.1} px)");
+        // the chequer: both its colours around the same place
+        let o = &outs[1];
+        let at = [(c0.x - 40.0).max(0.0) as usize, (c0.y - 40.0).max(0.0) as usize, (c0.x + 40.0) as usize, (c0.y + 40.0) as usize];
+        let (white, dark) = (pixels_near(o, at, [255, 255, 255], 30).len(), pixels_near(o, at, [17, 17, 17], 30).len());
+        eprintln!("{name}: chequered bar, {white} white px, {dark} dark px");
+        assert!(white > 3 && dark > 3, "{name}: the chequer has white and dark cells ({white} / {dark})");
+        h.destroy(&rig.gl);
     }
     rig.finish(&Gl3dHandle::new());
 }
@@ -2400,6 +2525,61 @@ fn gl3d_real_install_race_roads() {
     rig.finish(&Gl3dHandle::new());
 }
 
+/// D102 on the island: the start / finish bars of a real sprint (its start and its finish) and of
+/// a real circuit (its start), seen the way the three sites see them: the HUD, the Dashboard
+/// close (120 m) and at its usual zoom (300 m), looking along the race. PNGs to look at.
+#[test]
+#[ignore = "needs an EGL device and an FH6 install; writes PNGs"]
+fn gl3d_real_install_race_marks() {
+    use crate::gamedata::icons::RaceClass;
+    use crate::maprender::cfg::{RaceCfg, RaceLineMode};
+    let Some(w) = real_world() else {
+        eprintln!("SKIP gl3d_real_install_race_marks: no FH6 install");
+        return;
+    };
+    let Some(mut rig) = open(Flavour::Default, None, [900, 600]) else { return };
+    let (_hold, tex) = rig.load_map(&w, crate::minimap::OVERLAY_MAP_TEXTURE_OPTIONS);
+    let races = &w.layers.races;
+    let class = |li: usize| w.layers.race_class.get(&races.lines[li].route).copied();
+    let sprint = (0..races.lines.len()).find(|&li| class(li) == Some(RaceClass::AsphaltP2p) && races.lines[li].length_m > 2000.0);
+    let circuit = (0..races.lines.len()).find(|&li| class(li) == Some(RaceClass::AsphaltCircuit) && races.lines[li].closed);
+    let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(880.0, 580.0));
+    let cfg = RaceCfg { mode: RaceLineMode::Nearest, ..RaceCfg::default() };
+    for (name, li, which) in [("sprint_start", sprint, 0usize), ("sprint_finish", sprint, 1), ("circuit_start", circuit, 0)] {
+        let Some(li) = li else {
+            eprintln!("race mark {name}: no such route");
+            continue;
+        };
+        let draw = RaceSel::fixed(vec![li], false).race_draw(&w.layers, &cfg).expect("a line");
+        let m = draw.marks[which.min(draw.marks.len() - 1)];
+        let mesh = Some(Arc::new(crate::maprender::mesh3d::RoadMesh::race_roads(&draw.lines, &w.terrain)));
+        let r3 = Race3d { draw: draw.clone(), mesh, cfg };
+        let yaw = m.dir[0].atan2(m.dir[1]);
+        eprintln!("race mark {name}: route {} ({:?}) at ({:.0}, {:.0}) y {:.1}, dir {:?}, slope {:.3}, inset {}", races.lines[li].route, m.kind, m.at[0], m.at[1], m.y, m.dir, m.slope, m.inset);
+        // the car 25 m behind the mark along the race, so the road and the bar are ahead
+        let car = (m.at[0] - 25.0 * m.dir[0], m.at[1] - 25.0 * m.dir[1]);
+        let views = [
+            ("hud", View { car, yaw, zoom: 500.0, car_y: Some(m.y + 1.0), ..View::hud() }, 2.0f32),
+            ("dash300", View { site: Site::Dashboard, rect, car, yaw, zoom: 300.0, angle: 50.0, car_y: Some(m.y + 1.0), clip: None, no_3d: false, marker: None, mates: vec![] }, 1.0),
+            ("dash120", View { site: Site::Dashboard, rect, car, yaw, zoom: 120.0, angle: 50.0, car_y: Some(m.y + 1.0), clip: None, no_3d: false, marker: None, mates: vec![] }, 1.0),
+            ("dash1500", View { site: Site::Dashboard, rect, car, yaw, zoom: 1500.0, angle: 50.0, car_y: Some(m.y + 1.0), clip: None, no_3d: false, marker: None, mates: vec![] }, 1.0),
+        ];
+        for (vn, v, ppp) in views {
+            let h = Gl3dHandle::with_options(Gl3dOptions { guard: None, ..Default::default() });
+            warm_up(&mut rig, &w, &h, tex, &v, ppp);
+            let mut o = None;
+            for _ in 0..4 {
+                o = Some(map_frame(&mut rig, &w, &h, tex, &v, ppp, &|s| s.race = Some(r3.clone())));
+            }
+            let o = o.unwrap();
+            assert_eq!(o.gl_error, 0, "{name} {vn}");
+            o.save(&format!("racemark_real_{name}_{vn}.png"));
+            h.destroy(&rig.gl);
+        }
+    }
+    rig.finish(&Gl3dHandle::new());
+}
+
 /// D88 on the island: every line of mode `all` (170 lines, ~1 000 km) as one race mesh, in both
 /// styles and with the marks: build time, size and a frame to look at. `--release` for the numbers.
 #[test]
@@ -2419,6 +2599,10 @@ fn gl3d_real_install_all_race_lines() {
     let t1 = std::time::Instant::now();
     let mesh = Arc::new(crate::maprender::mesh3d::RoadMesh::race_roads(&draw.lines, &w.terrain));
     let t_mesh = t1.elapsed().as_secs_f64() * 1e3;
+    // D102: the bars are built per frame; what that costs for every mark of `all`
+    let t2 = std::time::Instant::now();
+    let nv = (0..100).map(|_| super::racemark::vertices(&draw.marks, &w.terrain, false).len()).last().unwrap_or(0);
+    eprintln!("mark vertices: {} floats for {} marks, {:.3} ms per build", nv, draw.marks.len(), t2.elapsed().as_secs_f64() * 1e1);
     let km: f64 = w.layers.races.lines.iter().map(|l| l.length_m).sum::<f64>() / 1000.0;
     eprintln!(
         "all race lines: {} lines, {} marks, {:.0} km; race_draw {:.1} ms; mesh {:.1} ms, {} samples, {} + {} triangles (near + far), {:.1} MB vertices",

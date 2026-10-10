@@ -441,6 +441,78 @@ void main() {
 }
 "#;
 
+/// The race lines' start / finish bars (D102, `racemark`): a quad lying across the race road. The
+/// vertex carries the line's point, its direction and climb and the quad's corner; the size is
+/// worked out here with the road shader's own width rule (the race road's fill plus casing at this
+/// depth, `ROAD_VS`), so the bar spans the drawn road at every zoom, plus `uMark.z` px each side.
+pub const MARK_VS: &str = r#"
+layout(location = 0) in vec3 aP;     // the line's point: x, height (the ground's when unknown), z
+layout(location = 1) in vec3 aD;     // the way the race runs (x, z) and the climb along it (m per m)
+layout(location = 2) in vec4 aI;     // height known (1 / 0), centre inset (bar depths), corner across, corner along (+-1)
+layout(location = 3) in float aKind; // 0 = sprint start (green), 1 = chequered
+uniform vec4 uRW;        // the road width rule: metres, min px, max px, casing px (RoadStyles)
+uniform vec2 uRoad;      // the race road's width factor, cased (1) or not (0)
+uniform vec4 uMark;      // bar depth (m), its minimum depth (px), overhang (px), depth bias
+uniform vec2 uVp;        // viewport px
+uniform float uLift;     // metres above the ground (mesh3d::LIFT_M)
+out vec2 vUV;
+out float vCamZ;
+flat out vec4 vInfo;     // cells across, kind, half extent across (px), half extent along (px)
+void main() {
+  vec3 fwd = vec3(aD.x, 0.0, aD.y);
+  vec3 perp = vec3(-aD.y, 0.0, aD.x);
+  bool known = aI.x > 0.5;
+  vec3 base = vec3(aP.x, (known ? aP.y : heightAt(aP.xz)) + uLift, aP.z);
+  vec4 c0 = projectW(base);
+  float ppm = uCam.x * uCam.y / max(c0.w, 1.0);          // px per metre at this depth
+  float px = max(clamp(ppm * uRW.x, uRW.y, uRW.z) * uRoad.x, 0.7) + uRW.w * uRoad.y;
+  // px per metre across and along the road on the screen (a tilted view foreshortens the second)
+  vec2 s0 = c0.xy / c0.w * 0.5 * uVp;
+  vec4 cp = projectW(base + perp);
+  vec4 cf = projectW(base + fwd);
+  float across = clamp(length(cp.xy / cp.w * 0.5 * uVp - s0), 0.2 * ppm, 2.0 * ppm);
+  float along = clamp(length(cf.xy / cf.w * 0.5 * uVp - s0), 0.2 * ppm, 2.0 * ppm);
+  float hw = 0.5 * px / ppm + uMark.z / across;          // half width, metres
+  float depth = max(uMark.x, uMark.y / along);
+  depth = max(min(depth, 2.0 * hw), 0.6 * uMark.y / along);
+  float cells = max(2.0, floor(2.0 * hw / (0.5 * depth) + 0.5));
+  float off = (aI.y + 0.5 * aI.w) * depth;               // this corner's place along the road
+  vec3 p = base + fwd * off + perp * aI.z * hw;
+  p.y = (known ? aP.y + aD.z * off : heightAt(p.xz)) + uLift;
+  vec4 c = projectW(p);
+  c.z -= uCam.z * c.w * uMark.w;
+  vUV = aI.zw;
+  vCamZ = c.w;
+  vInfo = vec4(cells, aKind, hw * across, 0.5 * depth * along);
+  gl_Position = c;
+}
+"#;
+
+pub const MARK_FS: &str = r#"
+in vec2 vUV;
+in float vCamZ;
+flat in vec4 vInfo;
+uniform vec3 uCols[4];   // chequer white, chequer dark, sprint start green, outline
+out vec4 oC;
+void main() {
+  float a = farFade(vCamZ);
+  if (a < 0.004) discard;
+  vec3 col = uCols[2];
+  if (vInfo.y > 0.5) {
+    // two rows of cells, the cell count across set by the vertex shader; the checker is filtered
+    // over the pixel (a box filter of the square wave), so cells of a pixel or less go grey
+    vec2 q = vec2((vUV.x * 0.5 + 0.5) * vInfo.x, (vUV.y * 0.5 + 0.5) * 2.0);
+    vec2 w = max(fwidth(q), vec2(1e-4));
+    vec2 i = 2.0 * (abs(fract((q - 0.5 * w) * 0.5) - 0.5) - abs(fract((q + 0.5 * w) * 0.5) - 0.5)) / w;
+    col = mix(uCols[0], uCols[1], 0.5 - 0.5 * i.x * i.y);
+  }
+  // a 1 px dark outline all round, so the bar reads on any road colour
+  float d = min((1.0 - abs(vUV.x)) * vInfo.z, (1.0 - abs(vUV.y)) * vInfo.w);
+  col = mix(uCols[3], col, clamp(d - 0.5, 0.0, 1.0));
+  oC = vec4(col * a, a);
+}
+"#;
+
 pub const COMP_VS: &str = r#"
 out vec2 vUv;
 void main() {
@@ -539,4 +611,5 @@ pub const ROAD_UNIFORMS: &[&str] = &[
 ];
 pub const COMP_UNIFORMS: &[&str] = &["uTex", "uUv", "uSizePx", "uRadius", "uAlpha"];
 pub const MARKER_UNIFORMS: &[&str] = &["uVP", "uCar", "uExag", "uCam", "uPos", "uRot", "uK", "uColor", "uHull", "uAlpha"];
-pub const TRAIL_UNIFORMS: &[&str] = &["uVP", "uCar", "uExag", "uCam", "uH", "uHSize", "uHGeo", "uW", "uVp", "uColor", "uAlpha"];
+pub const MARK_UNIFORMS: &[&str] = &["uVP", "uCar", "uExag", "uCam", "uH", "uHSize", "uHGeo", "uRW", "uRoad", "uMark", "uVp", "uLift", "uCols"];
+pub const TRAIL_UNIFORMS:&[&str] = &["uVP", "uCar", "uExag", "uCam", "uH", "uHSize", "uHGeo", "uW", "uVp", "uColor", "uAlpha"];

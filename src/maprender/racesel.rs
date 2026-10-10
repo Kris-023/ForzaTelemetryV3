@@ -489,16 +489,18 @@ impl RaceSel {
                 None => RaceRoad { pts: l.pts.clone(), y: l.y.clone(), closed: l.closed },
             };
             let (start, finish) = (span.is_none_or(|sp| sp.start), span.is_none());
-            let mut mark = |i: Option<usize>, kind| {
-                if let Some(p) = i.and_then(|i| l.pts.get(i)) {
-                    d.marks.push(RaceMark { at: *p, y: i.and_then(|i| l.y.get(i)).copied().unwrap_or(0.0), kind });
+            let mut mark = |i: Option<usize>, kind, inset: f32| {
+                if let Some(m) = i.and_then(|i| RaceMark::at_end(l, i, kind, inset)) {
+                    d.marks.push(m);
                 }
             };
+            // A line's own ends: the bar lies on the road (inset half a bar into it); a closed
+            // circuit's start has road on both sides.
             if start {
-                mark(Some(0), if l.circuit { MarkKind::Chequered } else { MarkKind::SprintStart });
+                mark(Some(0), if l.circuit { MarkKind::Chequered } else { MarkKind::SprintStart }, if l.closed { 0.0 } else { 0.5 });
             }
             if finish && !l.circuit {
-                mark(l.pts.len().checked_sub(1), MarkKind::Chequered);
+                mark(l.pts.len().checked_sub(1), MarkKind::Chequered, -0.5);
             }
             if road.pts.len() >= 2 {
                 d.lines.push(road);
@@ -847,7 +849,8 @@ pub enum MarkKind {
     Chequered,
 }
 
-/// A start / finish mark at a line's end, for the 3D scene (D88).
+/// A start / finish mark at a line's end, for the 3D scene (D88): a bar lying across the race
+/// road (D102, `gl3d::racemark`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RaceMark {
     /// x, z.
@@ -855,6 +858,46 @@ pub struct RaceMark {
     /// The line's own height there (0 = unknown, the scene takes the terrain).
     pub y: f32,
     pub kind: MarkKind,
+    /// The way the race runs there (unit vector x, z): the line's first segment at a start, its
+    /// last one at a finish. The bar lies across it.
+    pub dir: [f32; 2],
+    /// The line's climb along `dir` (m per m; 0 when a height is unknown), so the bar's two
+    /// edges follow the deck instead of sinking into a slope.
+    pub slope: f32,
+    /// The bar's centre in bar depths along `dir` from `at`: +0.5 puts a line start's bar on the
+    /// road ahead of the point, -0.5 a finish's on the road behind it, 0 centres it (a closed
+    /// circuit has road on both sides). *Why:* the line ends at the point, a centred bar would
+    /// hang half off the road's end.
+    pub inset: f32,
+}
+
+impl RaceMark {
+    /// The mark at point `i` (an end) of `l`: direction and slope from the segment at that end.
+    /// `None` for a point out of range.
+    pub fn at_end(l: &RaceLine, i: usize, kind: MarkKind, inset: f32) -> Option<RaceMark> {
+        let at = *l.pts.get(i)?;
+        let y = l.y.get(i).copied().unwrap_or(0.0);
+        // the nearest other point that is not on top of this one, on the line's inner side
+        let step: isize = if i == 0 { 1 } else { -1 };
+        // `dir` points the way the race runs: away from a start, into a finish
+        let sign = -(step as f32);
+        let (mut dir, mut slope) = ([0.0f32, 1.0], 0.0);
+        let mut j = i as isize + step;
+        while let Some(q) = usize::try_from(j).ok().and_then(|j| l.pts.get(j)) {
+            let (dx, dz) = (at[0] - q[0], at[1] - q[1]);
+            let len = dx.hypot(dz);
+            if len > 0.5 {
+                dir = [sign * dx / len, sign * dz / len];
+                let yq = l.y.get(j as usize).copied().unwrap_or(0.0);
+                if known_y(y).is_some() && known_y(yq).is_some() {
+                    slope = sign * (y - yq) / len;
+                }
+                break;
+            }
+            j += step;
+        }
+        Some(RaceMark { at, y, kind, dir, slope, inset })
+    }
 }
 
 /// What the 3D scene draws of the race lines in the current mode (D88), see
@@ -1294,6 +1337,27 @@ mod tests {
     /// D88: `race_draw` hands the 3D scene what is drawn: the shared part while uncertain (start
     /// mark only), the whole route once certain (both marks), every line in `All`, nothing in
     /// `Off`; the same `Arc` while the drawn set is unchanged.
+    /// D102: a mark's direction is the line's first segment at a start and its last at a finish
+    /// (the way the race runs), its slope the climb along it; a point on top of the end is skipped;
+    /// an unknown height (0) gives no slope.
+    #[test]
+    fn a_race_mark_points_the_way_the_race_runs() {
+        let mut l = route(1, &[[0.0, 0.0], [30.0, 0.0], [30.0, 40.0]], false);
+        l.pts.insert(1, [0.1, 0.0]); // a duplicate-ish point right behind the start
+        l.y = (0..l.pts.len()).map(|i| 100.0 + i as f32).collect();
+        let n = l.pts.len();
+        let s = RaceMark::at_end(&l, 0, MarkKind::SprintStart, 0.5).unwrap();
+        assert!((s.dir[0] - 1.0).abs() < 1e-4 && s.dir[1].abs() < 1e-4, "east at the start: {s:?}");
+        // 2 m between the first point and the first one 5 m on: (y[2] - y[0]) / 5.0
+        assert!((s.slope - 2.0 / 5.0).abs() < 1e-3, "{s:?}");
+        let f = RaceMark::at_end(&l, n - 1, MarkKind::Chequered, -0.5).unwrap();
+        assert!(f.dir[0].abs() < 1e-4 && (f.dir[1] - 1.0).abs() < 1e-4, "north into the finish: {f:?}");
+        assert!((f.slope - 1.0 / 5.0).abs() < 1e-3, "climbs 1 m per 5 m: {f:?}");
+        l.y = vec![0.0; n];
+        assert_eq!(RaceMark::at_end(&l, 0, MarkKind::SprintStart, 0.0).unwrap().slope, 0.0, "no heights, no slope");
+        assert!(RaceMark::at_end(&l, n, MarkKind::SprintStart, 0.0).is_none());
+    }
+
     #[test]
     fn race_draw_carries_the_lines_and_marks_of_the_drawn_extent() {
         let layer = fork_layer();
@@ -1315,6 +1379,13 @@ mod tests {
         assert!(!Arc::ptr_eq(&d, &d2));
         assert_eq!(d2.lines[0].pts.len(), layers.races.lines[0].pts.len());
         assert_eq!(d2.marks.len(), 2);
+        // D102: the bars lie across the race, which runs north (+z) here: inset onto the road
+        // from either end, pointing the way the race runs at both
+        let (s, f) = (d2.marks[0], d2.marks[1]);
+        assert_eq!((s.kind, s.inset, f.kind, f.inset), (MarkKind::SprintStart, 0.5, MarkKind::Chequered, -0.5));
+        for m in [s, f] {
+            assert!(m.dir[0].abs() < 1e-4 && (m.dir[1] - 1.0).abs() < 1e-4 && m.slope == 0.0, "{m:?}");
+        }
         // The look (style, colour) is not part of the set: no rebuild.
         let line_cfg = RaceCfg { route: crate::maprender::cfg::RouteStyle::Line, ..cfg };
         assert!(Arc::ptr_eq(&d2, &sel.race_draw(&layers, &line_cfg).unwrap()));

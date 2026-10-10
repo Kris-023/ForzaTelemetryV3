@@ -728,16 +728,42 @@ before).
   ribbons:* one mesh, one plan (tiles are culled per frame), the same depth bias and tunnel pass as
   the race road, and the heights and joins come for free; 170 lines would be ~170 k segments of
   streamed trail vertices every frame.
-  *Marks (D88, `gl3d::racemark`):* **posts**, drawn with the trail ribbon program (`draw_race_marks`):
-  a vertical ribbon on the line at its own height (`RaceMark::y`, 0 = the terrain), constant screen
-  width (5 pt, dark outline 8 pt) and a height of 18 pt *at the car's distance* (it shrinks with
-  the perspective like the icons). A sprint start is green (`style::START_DOT`), a circuit start and a
-  sprint finish are chequered (white / dark / white cells). Depth-tested with a bias a little above
-  the race road's fill (`RACE_BIAS_MARK` 0.0045), **no ghost pass** (a trail is "seen through" a
-  hill, a mark is not); a mark whose line is 4 m or more under the terrain is drawn without the depth
-  test, like a tunnel. *Why posts, not flat bars across the road:* from the tilted camera a bar on the
-  road is a hairline and has to be as wide as the road; a post is a few vertices and reads at any
-  angle and zoom. Built per frame (the size follows the zoom): a few hundred marks at most.
+  *Marks (D88, D102, `gl3d::racemark`):* **bars lying across the race road**, like the paint of a
+  start / finish line (D88 / #231 drew upright posts; D102 replaced them. *Why (the user,
+  2026-10-10):* "In the 3D mode, the finish line is turned by 90 degrees, it looks like. At least it
+  isnt wide enough" - a post beside a road reads as a small thing next to it, a bar across it reads
+  as the line). One flat quad per mark (6 vertices of 11 floats, `racemark::vertices`) drawn by the
+  program of its own (`shaders::MARK_VS` / `MARK_FS`, `draw_race_marks`), lying on the race road at
+  the line's own height (`RaceMark::y`, 0 = the terrain; the quad follows the line's climb,
+  `RaceMark::slope`, so its far edge does not sink into a slope; an unknown height takes the terrain
+  per corner).
+  *Orientation:* `RaceMark::dir` = the way the race runs there (the line's first segment at a start,
+  its last at a finish, `RaceMark::at_end`); the bar's long axis is perpendicular to it. It is the
+  data's line, not the `.owt` half-width vector, because the bar must lie across the *drawn*
+  ribbon, which is built from the same points. *Placement:* a sprint start and a finish are inset
+  half a bar onto the road (`RaceMark::inset` +0.5 / -0.5: the line ends at the point, a centred
+  bar would hang off the road's end); a closed circuit's start is centred (road on both sides).
+  *Width (the point of D102):* the vertex shader applies the **same width rule as the race road's
+  ribbon** (`ROAD_VS`: `clamp(ppm x metres, min, max) x RACE_ROAD_WIDTH` + the casing px when the
+  style is cased, from the very `race_table` the race mesh is drawn with) at the mark's depth, plus
+  `OVERHANG_PX` (1.5 px) each side, so the bar spans the drawn road at every zoom and style (in the
+  thin Line style it is the line's width plus the overhang). *Why in the shader and not in metres on
+  the CPU:* the drawn road's width in metres depends on the zoom and the depth (it is a px rule), so
+  a CPU width would be stale the next frame; the shader has it for free. *Depth along the road:*
+  `BAR_DEPTH_M` 4 m, but at least `MIN_DEPTH_PX` (8 px, x size factor x ppp) measured *along the
+  road on the screen* (the tilt foreshortens it), so zoomed out the bar does not vanish, and never
+  deeper than wide. *Look:* a sprint start is a green bar (`style::START_DOT`), a circuit start and a
+  sprint finish are chequered: two rows of cells of half the bar depth, the column count rounded so
+  the cells are square across the width (`MARK_FS`; procedural, the checker filtered over the pixel
+  with `fwidth` so cells of a pixel or less go grey instead of shimmering, in the spirit of #235), all
+  with a 1 px dark outline. Depth-tested with a bias a little above the race road's fill
+  (`RACE_BIAS_MARK` 0.0045), **no ghost pass** (a trail is "seen through" a hill, a mark is not); a
+  mark whose line is 4 m or more under the terrain is drawn without the depth test, like a tunnel.
+  *Cost:* built per frame from the `RaceDraw`'s marks and streamed (STREAM_DRAW) into one buffer,
+  one draw call for the open marks and one for the tunnel ones: at most ~340 marks x 6 vertices x
+  44 bytes: the 297 marks of `all` mode are 78 KB and build in 0.018 ms (release), so no cache to keep coherent (the geometry
+  does not depend on the camera any more, the size is the shader's). The flat and tilted 2D marks
+  (`paint2d::draw_race_marks`: the small icon at the point) are unchanged.
   *Occlusion (D88; the user, 2026-10-10: "occlusion should work for the race circuit aswel"):* the race
   lines (both styles) and their marks are hidden behind hills and under decks above them exactly like
   the road ribbons: their open stretches are depth-tested and only tunnel stretches (>= 4 m under the
@@ -745,7 +771,11 @@ before).
   `gl3d::tests::gl3d_race_road_is_hidden_behind_hills` (a race road behind the big hill is not drawn, the
   same road seen from the other side is; a road along the elevated highway is covered by the deck) and
   `gl3d_race_lines_and_marks_are_hidden_behind_hills` (non-focus lines of the Road style, the thin
-  Line style and the posts: 0 pixels behind the hill, drawn in plain view).
+  Line style and the marks: 0 pixels behind the hill, drawn in plain view) and
+  `gl3d_race_marks_span_the_road_and_lie_across_it` (the bar is at least as wide as the drawn road
+  and its long axis is the projected world perpendicular to the race direction, flat and diagonal
+  views at 120 m / 300 m / 1500 m; the chequer holds white and dark; `gl3d_real_install_race_marks`
+  renders real starts and finishes at the HUD and Dashboard zooms), `racesel::tests::a_race_mark_points_the_way_the_race_runs`.
 - **Over the 3D view** `paint2d` draws **no race line and no mark** (`Parts::OVER_3D` = POIs only; 2D
   and Tilted keep `draw_race_lines`). The call sites (`ui/map_scene.rs`, `hud/minimap.rs`) hand the
   scene the race lines whenever the mode draws any (`race_draw`), and the in-race focus only when
