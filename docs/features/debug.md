@@ -37,7 +37,8 @@ right" before the app relies on these values anywhere.
 | Row | Source |
 | --- | --- |
 | Experimental pause detection | `config.experimental_pause_detection` |
-| Paused / Pause reason | `debug_tab::pause_reasons`: the same checks as `listeners::hud::hud_paused` (race off, `engine_max_rpm <= 0`, zero yaw/pitch/roll, and `garage_paused` only when experimental is on), one line per rule that fired. A `debug_assert` keeps it equal to `hud_paused`. |
+| Nearest house | Only with experimental pause detection on: the closest player house to the car and its 3D distance (e.g. `Futurist (9.1 m)`), or "none (map data not loaded)" while the house list is empty (`listeners::houses::current` / `nearest_house`). The garage rule fires at <= 25 m. |
+| Paused / Pause reason | `debug_tab::pause_reasons`: the same checks as `listeners::hud::hud_paused` (race off, `engine_max_rpm <= 0`, zero yaw/pitch/roll, and `garage_paused`, house within 25 m + handbrake 255 + gear 1, only when experimental is on), one line per rule that fired. A `debug_assert` keeps it equal to `hud_paused` (called with the same `PauseRule`). |
 | In race | `race_position != 0` (the gearbox's own in-race test) |
 | HUD mode | `app.hud_mode` (Race / Drift; `HudMode` has no separate free-roam variant, so non-drift reads "Race / free roam"). Flow: `DsgListener.hud_mode` (its own `ModeClassifier`) → `ListenerView::hud_mode` → `ForzaApp::adopt_listener_view`. *Why the DSG's classifier:* it is fed every packet whether or not the overlay is on; the HUD tracker's copy only runs while the overlay is enabled. |
 | Gearbox selected / effective / resolved | `config.dsg_gearbox_mode`, `dsg_effective_mode(in_race)`, `dsg_resolved_mode(in_race, in_drift)` with the real drift flag (`off` = None). |

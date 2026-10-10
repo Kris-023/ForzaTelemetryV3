@@ -299,6 +299,7 @@ might produce.
 | `map_shared.rs` | Marker drawing shared with the Dashboard map: own arrow, teammates, trails, waypoints (`MapCanvas`, which holds the `maprender::Camera`, tilt included; `to_screen` goes through `Camera::project`, so markers sit on the terrain in the 3D view). |
 | `race.rs` | R1′ race block; the position cap shared with the drift counter. |
 | `drift.rs` | X1′ drift counter, Position + Gain and Total styles. |
+| `houses.rs` | The 8 player-house positions for the experimental garage pause rule (D103): `HousePoller` (≤ 1 poll/s of `maprender::store::layers()`, only while the setting is on), `nearest_house`, `current()` for the Debug tab. See [[overlay]]. |
 | `notify.rs` | D26 notification pills: pure `stack_layout`, fade curve, `draw`. |
 | `layout.rs` | The 3×3 slot layout and stacking (`MARGIN` 44, `GAP` 12). |
 | `anim.rs` | Time-based curves: fade, pulse, place change, lap hold, chip, count-up. |

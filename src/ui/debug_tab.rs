@@ -74,7 +74,7 @@ impl CarDbState {
 }
 
 /// Why the HUD considers the game paused: one line per rule that fired (empty = not paused).
-fn pause_reasons(pkt: &ForzaPacket, experimental: bool) -> Vec<&'static str> {
+fn pause_reasons(pkt: &ForzaPacket, rule: crate::listeners::hud::PauseRule) -> Vec<&'static str> {
     use crate::listeners::hud::{garage_paused, hud_paused};
     let mut r = Vec::new();
     if pkt.is_race_on == 0 {
@@ -86,10 +86,10 @@ fn pause_reasons(pkt: &ForzaPacket, experimental: bool) -> Vec<&'static str> {
     if pkt.yaw == 0.0 && pkt.pitch == 0.0 && pkt.roll == 0.0 {
         r.push(tr("Zero attitude (yaw = pitch = roll = 0)"));
     }
-    if experimental && garage_paused(pkt).is_some() {
-        r.push(tr("Garage rule (level + handbrake 255 + standing still)"));
+    if rule.experimental && garage_paused(pkt, rule.houses).is_some() {
+        r.push(tr("Garage rule (house within 25 m + handbrake 255 + gear 1)"));
     }
-    debug_assert_eq!(!r.is_empty(), hud_paused(pkt, experimental));
+    debug_assert_eq!(!r.is_empty(), hud_paused(pkt, rule));
     r
 }
 
@@ -280,8 +280,16 @@ fn derived_card(ui: &mut egui::Ui, app: &crate::app::ForzaApp) {
                 let exp = app.config.experimental_pause_detection;
                 row(ui, tr("Experimental pause detection"), yes_no(exp));
                 if let Some(pkt) = &app.telemetry.latest {
-                    let reasons = pause_reasons(pkt, exp);
+                    let houses = crate::listeners::houses::current();
+                    let reasons = pause_reasons(pkt, crate::listeners::hud::PauseRule { experimental: exp, houses: &houses });
                     row(ui, tr("Paused"), yes_no(!reasons.is_empty()));
+                    if exp {
+                        let near = crate::listeners::houses::nearest_house(pkt, &houses);
+                        row(ui, tr("Nearest house"), near.map_or_else(
+                            || tr("none (map data not loaded)").to_string(),
+                            |(h, d)| format!("{} ({d:.1} m)", h.name),
+                        ));
+                    }
                     row(ui, tr("Pause reason"), if reasons.is_empty() { "-".into() } else { reasons.join("\n") });
                     let in_race = pkt.race_position != 0;
                     row(ui, tr("In race (race position set)"), yes_no(in_race));

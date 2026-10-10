@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use crate::config::{AppConfig, OverlayConfig};
+use crate::listeners::houses::{nearest_house, House};
 use crate::listeners::lap_trace::LapTrace;
 use crate::overlay::snapshot::{
     DriftChip, DriftInfo, HudEvents, HudMode, HudSnapshot, MinimapCalib, PlaceChange,
@@ -159,51 +160,63 @@ impl DriftWindow {
 
 // ── Visibility target ────────────────────────────────────────────────────────
 
+/// How the experimental pause rule is evaluated: the setting and the house positions it needs
+/// (`listeners::houses`). One value passed to every caller of [`hud_paused`] (HUD tracker,
+/// gearbox's drift window, `driving_car`, the Debug tab), so they cannot disagree.
+#[derive(Debug, Clone, Copy)]
+pub struct PauseRule<'a> {
+    /// `AppConfig::experimental_pause_detection`.
+    pub experimental: bool,
+    pub houses: &'a [House],
+}
+
+impl PauseRule<'_> {
+    /// Only the always-on terms (tests).
+    #[cfg(test)]
+    pub const OFF: PauseRule<'static> = PauseRule { experimental: false, houses: &[] };
+}
+
 /// The HUD's one "paused" fact: race off, max rpm 0 (menus), or 0/0/0 orientation (loading
 /// screens). Why max rpm, not current rpm: FH6 sends `engine_max_rpm == 0` while paused or in
 /// menus, while the current rpm is legitimately 0 for an EV at a standstill (user-confirmed).
 /// Why the orientation: loading screens send 0/0/0 (user-observed; the pause menu keeps the
 /// real rotation), and a real car is never exactly level on all three axes.
 /// HUD only; gearbox and backfire keep their rules.
-/// `experimental` (`AppConfig::experimental_pause_detection`) adds [`garage_paused`] (D29).
-pub fn hud_paused(pkt: &ForzaPacket, experimental: bool) -> bool {
+/// `rule.experimental` adds [`garage_paused`] (D103).
+pub fn hud_paused(pkt: &ForzaPacket, rule: PauseRule) -> bool {
     let zero_orientation = pkt.yaw == 0.0 && pkt.pitch == 0.0 && pkt.roll == 0.0;
     pkt.is_race_on == 0
         || pkt.engine_max_rpm <= 0.0
         || zero_orientation
-        || (experimental && garage_paused(pkt).is_some())
+        || (rule.experimental && garage_paused(pkt, rule.houses).is_some())
 }
 
-/// Which part of the experimental garage rule matched (nothing is returned when it didn't).
-/// Exposed for the Debug tab (D24).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GarageMatch {
-    /// Level (|yaw|, |pitch|, |roll| < 0.01), handbrake 255, and no linear velocity.
-    LevelHandbrakeStill,
-}
+/// The car is this close (m, 3D) to a `House` marker for the garage rule.
+/// Why 25: the user's pick ("25meter should be fine"); the one captured garage sample sits
+/// 9.1 m from its marker (the markers are at garage height, so 3D is as good as 2D), and the 8
+/// houses on the island are at least 1.7 km apart, so 25 m can never match two houses or a
+/// house you merely drive past at speed with the handbrake on in first gear.
+pub const GARAGE_RANGE_M: f32 = 25.0;
+/// `ForzaPacket::hand_brake` fully on.
+const GARAGE_HANDBRAKE: u8 = 255;
+/// `ForzaPacket::gear` of the first gear (0 = reverse, 1 = first).
+const GARAGE_GEAR: u8 = 1;
 
-/// Orientation magnitude below this (rad) counts as "level".
-const GARAGE_LEVEL_EPS: f32 = 0.01;
-/// Linear velocity component magnitude below this counts as "motionless".
-const GARAGE_STILL_EPS: f32 = 0.01;
-
-/// D29 experimental garage / menu detection. FH6 keeps `is_race_on = 1` and a normal max rpm in
-/// the garage, so the other pause rules miss it. A garage packet is level (yaw/pitch/roll ~ 0),
-/// has the handbrake fully on (255) and zero linear velocity. Angular velocity is deliberately
-/// NOT checked: it jumps when accelerating while standing still and when rotating the car in the
-/// garage. Pure: no state, no debounce (the HUD
-/// already waits [`PAUSE_HIDE_SECS`] before hiding). Limitation: a garage view with the car
-/// rotated (yaw far from 0) is missed.
-pub fn garage_paused(pkt: &ForzaPacket) -> Option<GarageMatch> {
-    let level = pkt.yaw.abs() < GARAGE_LEVEL_EPS
-        && pkt.pitch.abs() < GARAGE_LEVEL_EPS
-        && pkt.roll.abs() < GARAGE_LEVEL_EPS;
-    let still = [
-        pkt.velocity_x, pkt.velocity_y, pkt.velocity_z,
-    ]
-    .iter()
-    .all(|v| v.abs() < GARAGE_STILL_EPS);
-    (level && pkt.hand_brake == 255 && still).then_some(GarageMatch::LevelHandbrakeStill)
+/// D103 experimental garage detection (replaces D29's level + handbrake + standing-still rule).
+/// FH6 keeps `is_race_on = 1` and a normal max rpm in the garage, so the other pause rules
+/// miss it. The user's rule: "check wether the car is within a certain range of a house. The
+/// handbrake being at '255' and the gear being at '1'". Returns the house and the distance (m)
+/// when all three hold. Pure: no state, no debounce (the HUD already waits [`PAUSE_HIDE_SECS`]
+/// before hiding).
+/// Why position instead of attitude/velocity (D29): no sensor says "garage", but where the car
+/// stands does, and it works with the car rotated in the garage and with the car moving on the
+/// turntable.
+/// Fail closed: with no houses (no install, map data still loading) it never matches.
+pub fn garage_paused<'a>(pkt: &ForzaPacket, houses: &'a [House]) -> Option<(&'a House, f32)> {
+    if pkt.hand_brake != GARAGE_HANDBRAKE || pkt.gear != GARAGE_GEAR {
+        return None;
+    }
+    nearest_house(pkt, houses).filter(|&(_, d)| d <= GARAGE_RANGE_M)
 }
 
 /// Paused this long (s) → hidden. Short enough to clear the screen promptly on the pause
@@ -248,6 +261,8 @@ pub struct HudTracker {
     pkt: ForzaPacket,
     /// `pkt` is a real packet (not the default).
     have_pkt: bool,
+    /// [`hud_paused`] on `pkt`, evaluated once in `on_packet` with the house list of that moment.
+    paused: bool,
     last_packet_at: Option<f64>,
     /// When the drift score last rose (X1′'s live dot).
     last_rise_at: Option<f64>,
@@ -263,8 +278,10 @@ impl HudTracker {
     }
 
     /// Feed one packet received at `now`.
-    pub fn on_packet(&mut self, pkt: &ForzaPacket, cfg: &OverlayConfig, experimental_pause: bool, now: f64) {
-        let running = !hud_paused(pkt, experimental_pause);
+    pub fn on_packet(&mut self, pkt: &ForzaPacket, cfg: &OverlayConfig, rule: PauseRule, now: f64) {
+        let paused = hud_paused(pkt, rule);
+        let running = !paused;
+        self.paused = paused;
         if self.have_pkt {
             let prev = &self.pkt;
             if pkt.car_ordinal != prev.car_ordinal {
@@ -342,7 +359,7 @@ impl HudTracker {
             built_at: now,
             visible: visible_target(&facts, now),
             connected: self.last_packet_at.is_some_and(|t| now - t < NO_PACKET_HIDE_SECS),
-            paused: self.have_pkt && hud_paused(&self.pkt, app.experimental_pause_detection),
+            paused: self.have_pkt && self.paused,
             hud_hidden: facts.hud_hidden,
             redline_rpm,
             shift_rpm,
@@ -598,12 +615,12 @@ mod tests {
             yaw: 0.5,
             ..Default::default()
         };
-        tr.on_packet(&p, &cfg, false, 1.0);
+        tr.on_packet(&p, &cfg, PauseRule::OFF, 1.0);
         p.race_position = 4;
         p.gear = 4;
         p.lap_number = 1;
         p.timestamp_ms = 16;
-        tr.on_packet(&p, &cfg, false, 1.016);
+        tr.on_packet(&p, &cfg, PauseRule::OFF, 1.016);
         let live = VisFacts { enabled: true, ..Default::default() };
         let s = tr.snapshot(live, &cfg, &app, 0.0, 1.02);
         assert!(s.visible && s.connected && !s.paused);
@@ -616,7 +633,7 @@ mod tests {
         assert!((s.redline_rpm - 5950.0).abs() < 0.1 && (s.shift_rpm - 6860.0).abs() < 0.1);
 
         p.is_race_on = 0;
-        tr.on_packet(&p, &cfg, false, 2.0);
+        tr.on_packet(&p, &cfg, PauseRule::OFF, 2.0);
         let s = tr.snapshot(live, &cfg, &app, 0.0, 2.1);
         assert!(s.paused && s.visible, "not hidden before 300 ms");
         let s = tr.snapshot(live, &cfg, &app, 0.0, 2.4);
@@ -640,18 +657,18 @@ mod tests {
             pitch: 0.01,
             ..Default::default()
         };
-        tr.on_packet(&p, &cfg, false, 1.0);
+        tr.on_packet(&p, &cfg, PauseRule::OFF, 1.0);
         assert!(!tr.snapshot(live, &cfg, &app, 0.0, 1.0).paused);
         // Race on, max rpm 0 (menus): paused, hidden once the 0.3 s delay has passed.
         p.engine_max_rpm = 0.0;
-        tr.on_packet(&p, &cfg, false, 2.0);
+        tr.on_packet(&p, &cfg, PauseRule::OFF, 2.0);
         let s = tr.snapshot(live, &cfg, &app, 0.0, 2.1);
         assert!(s.paused && s.visible, "not hidden before 300 ms");
-        tr.on_packet(&p, &cfg, false, 2.35);
+        tr.on_packet(&p, &cfg, PauseRule::OFF, 2.35);
         assert!(!tr.snapshot(live, &cfg, &app, 0.0, 2.4).visible, "hidden after 300 ms");
         // Max rpm back: shown on the very next packet.
         p.engine_max_rpm = 7500.0;
-        tr.on_packet(&p, &cfg, false, 2.5);
+        tr.on_packet(&p, &cfg, PauseRule::OFF, 2.5);
         let s = tr.snapshot(live, &cfg, &app, 0.0, 2.5);
         assert!(!s.paused && s.visible);
     }
@@ -668,50 +685,111 @@ mod tests {
             roll: -0.01,
             ..Default::default()
         };
-        assert!(!hud_paused(&driving, false), "normal driving packet");
+        assert!(!hud_paused(&driving, PauseRule::OFF), "normal driving packet");
         let ev_stand = ForzaPacket { num_cylinders: 0, current_engine_rpm: 0.0, ..driving.clone() };
-        assert!(!hud_paused(&ev_stand, false), "EV at 0 rpm (standstill) with max rpm and real orientation is not paused");
+        assert!(!hud_paused(&ev_stand, PauseRule::OFF), "EV at 0 rpm (standstill) with max rpm and real orientation is not paused");
         for p in [&driving, &ev_stand] {
             let menu = ForzaPacket { engine_max_rpm: 0.0, ..(*p).clone() };
-            assert!(hud_paused(&menu, false), "max rpm 0 is paused");
+            assert!(hud_paused(&menu, PauseRule::OFF), "max rpm 0 is paused");
             let loading = ForzaPacket { yaw: 0.0, pitch: 0.0, roll: 0.0, ..(*p).clone() };
-            assert!(hud_paused(&loading, false), "0/0/0 orientation is paused");
+            assert!(hud_paused(&loading, PauseRule::OFF), "0/0/0 orientation is paused");
         }
         let off = ForzaPacket { is_race_on: 0, ..driving };
-        assert!(hud_paused(&off, false));
+        assert!(hud_paused(&off, PauseRule::OFF));
+    }
+
+    /// The captured garage sample: the player house "Futurist", car 9.1 m from its marker.
+    fn garage_sample() -> (ForzaPacket, Vec<House>) {
+        let pkt = ForzaPacket {
+            is_race_on: 1,
+            current_engine_rpm: 800.0,
+            engine_max_rpm: 8000.0,
+            yaw: 1.3,
+            pitch: 0.02,
+            roll: -0.01,
+            hand_brake: 255,
+            gear: 1,
+            position_x: -3761.010,
+            position_y: 481.438,
+            position_z: -2952.392,
+            ..Default::default()
+        };
+        let houses = vec![
+            House { x: -3770.1, y: 481.0, z: -2953.2, name: "Futurist".into() },
+            House { x: 4000.0, y: 20.0, z: 1500.0, name: "far".into() },
+        ];
+        (pkt, houses)
     }
 
     #[test]
     fn garage_pause_rule() {
-        // Captured garage packet: level, handbrake 255, everything else 0, race on, idle rpm.
-        let garage = ForzaPacket {
-            is_race_on: 1,
-            current_engine_rpm: 800.0,
-            engine_max_rpm: 8000.0,
-            yaw: -0.008,
-            hand_brake: 255,
-            ..Default::default()
-        };
-        assert_eq!(garage_paused(&garage), Some(GarageMatch::LevelHandbrakeStill));
-        assert!(hud_paused(&garage, true), "garage is paused with the setting on");
-        assert!(!hud_paused(&garage, false), "setting off: garage looks like normal driving");
+        let (garage, houses) = garage_sample();
+        let on = PauseRule { experimental: true, houses: &houses };
+        let (h, d) = garage_paused(&garage, &houses).expect("sample is in the garage");
+        assert_eq!(h.name, "Futurist");
+        assert!((d - 9.1).abs() < 0.05, "{d}");
+        assert!(hud_paused(&garage, on), "paused with the setting on");
+        assert!(!hud_paused(&garage, PauseRule { experimental: false, houses: &houses }), "setting off");
+        // Attitude and velocity no longer matter (D29's level / standing-still terms are gone).
+        let moving = ForzaPacket { velocity_z: 3.0, angular_velocity_x: 0.5, ..garage.clone() };
+        assert!(hud_paused(&moving, on));
 
-        let driving = ForzaPacket {
-            yaw: 1.2, pitch: 0.02, roll: -0.01, hand_brake: 0, velocity_x: 25.0,
+        // Range edge: 24.9 m in, 25.1 m out (along x, same height).
+        let at = |dist: f32| ForzaPacket {
+            position_x: houses[0].x + dist,
+            position_y: houses[0].y,
+            position_z: houses[0].z,
             ..garage.clone()
         };
-        assert!(garage_paused(&driving).is_none() && !hud_paused(&driving, true));
-        // Handbrake held on a slope (pitch 0.05): not level.
-        let slope = ForzaPacket { pitch: 0.05, ..garage.clone() };
-        assert!(garage_paused(&slope).is_none() && !hud_paused(&slope, true));
-        // Level, handbrake on, but moving.
-        let moving = ForzaPacket { velocity_z: 3.0, ..garage.clone() };
-        assert!(garage_paused(&moving).is_none());
-        let spinning = ForzaPacket { angular_velocity_x: 0.5, ..garage.clone() };
-        assert!(garage_paused(&spinning).is_some() && hud_paused(&spinning, true),
-            "angular velocity is ignored");
-        // Handbrake not fully on.
-        assert!(garage_paused(&ForzaPacket { hand_brake: 254, ..garage }).is_none());
+        assert!(hud_paused(&at(24.9), on));
+        assert!(!hud_paused(&at(25.1), on));
+        // 3D: 24 m sideways + 10 m up is 26 m.
+        let up = ForzaPacket { position_y: houses[0].y + 10.0, ..at(24.0) };
+        assert!(!hud_paused(&up, on));
+
+        // The other two terms.
+        assert!(!hud_paused(&ForzaPacket { hand_brake: 254, ..garage.clone() }, on));
+        assert!(!hud_paused(&ForzaPacket { hand_brake: 0, ..garage.clone() }, on));
+        assert!(!hud_paused(&ForzaPacket { gear: 2, ..garage.clone() }, on));
+        assert!(!hud_paused(&ForzaPacket { gear: 0, ..garage.clone() }, on));
+        // Fail closed: no house data (no install / still loading).
+        assert!(!hud_paused(&garage, PauseRule { experimental: true, houses: &[] }));
+        // Far from every house.
+        assert!(!hud_paused(&ForzaPacket { position_x: 0.0, position_z: 0.0, ..garage }, on));
+    }
+
+    /// Per-packet cost of the rule, worst case (handbrake 255 + gear 1, 8 houses, none in range).
+    /// `cargo test --release pause_rule_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn pause_rule_cost() {
+        let (mut pkt, _) = garage_sample();
+        pkt.position_x = 0.0;
+        pkt.position_z = 0.0;
+        let houses: Vec<House> = (0..8).map(|i| House { x: 1000.0 * i as f32, y: 200.0, z: 500.0, name: "h".into() }).collect();
+        let rule = PauseRule { experimental: true, houses: &houses };
+        let n = 5_000_000;
+        let t = std::time::Instant::now();
+        let mut c = 0_u32;
+        for i in 0..n {
+            pkt.position_x = (i % 1000) as f32;
+            c += hud_paused(std::hint::black_box(&pkt), rule) as u32;
+        }
+        eprintln!("hud_paused worst case: {:.1} ns/packet ({c})", t.elapsed().as_nanos() as f64 / n as f64);
+    }
+
+    #[test]
+    fn tracker_uses_the_house_rule() {
+        let (garage, houses) = garage_sample();
+        let (cfg, app) = (Arc::new(OverlayConfig::default()), AppConfig::default());
+        let mut tr = HudTracker::new();
+        let rule = PauseRule { experimental: true, houses: &houses };
+        tr.on_packet(&garage, &cfg, rule, 1.0);
+        let live = VisFacts { enabled: true, ..Default::default() };
+        assert!(tr.snapshot(live, &cfg, &app, 0.0, 1.1).paused);
+        assert!(!tr.snapshot(live, &cfg, &app, 0.0, 1.5).visible, "hidden after the debounce");
+        tr.on_packet(&garage, &cfg, PauseRule::OFF, 2.0);
+        assert!(!tr.snapshot(live, &cfg, &app, 0.0, 2.0).paused);
     }
 
     #[test]
@@ -735,7 +813,7 @@ mod tests {
         let live = VisFacts { enabled: true, ..Default::default() };
         let mut tr = HudTracker::new();
         let mut p = ForzaPacket { is_race_on: 1, current_engine_rpm: 3000.0, engine_max_rpm: 8000.0, gear: 3, num_cylinders: 4, yaw: 0.3, ..Default::default() };
-        tr.on_packet(&p, &cfg, false, 1.0);
+        tr.on_packet(&p, &cfg, PauseRule::OFF, 1.0);
         let mut app = AppConfig { dsg_enabled: false, ..Default::default() };
         assert_eq!(tr.snapshot(live, &cfg, &app, 0.0, 1.0).auto_gear, None);
         app.dsg_enabled = true;
@@ -743,7 +821,7 @@ mod tests {
         app.dsg_auto_race_mode = true;
         assert_eq!(tr.snapshot(live, &cfg, &app, 0.0, 1.0).auto_gear, Some(DriveMode::Street));
         p.race_position = 2;
-        tr.on_packet(&p, &cfg, false, 1.1);
+        tr.on_packet(&p, &cfg, PauseRule::OFF, 1.1);
         assert_eq!(tr.snapshot(live, &cfg, &app, 0.0, 1.1).auto_gear, Some(DriveMode::Race));
         app.dsg_auto_race_mode = false;
         assert_eq!(tr.snapshot(live, &cfg, &app, 0.0, 1.1).auto_gear, Some(DriveMode::Street));
@@ -762,7 +840,7 @@ mod tests {
             t = f64::from(i) / 60.0;
             p.timestamp_ms = (t * 1000.0).round() as u32;
             p.current_lap = (i / 6) as f32 * 100.0;
-            tr.on_packet(&p, &cfg, false, t);
+            tr.on_packet(&p, &cfg, PauseRule::OFF, t);
         }
         let s = tr.snapshot(live, &cfg, &app, 0.0, t);
         assert_eq!(s.mode, HudMode::Drift);
@@ -772,7 +850,7 @@ mod tests {
         for i in 240..300_u32 {
             let t = f64::from(i) / 60.0;
             p.timestamp_ms = (t * 1000.0).round() as u32;
-            tr.on_packet(&p, &cfg, false, t);
+            tr.on_packet(&p, &cfg, PauseRule::OFF, t);
         }
         assert_eq!(tr.snapshot(live, &cfg, &app, 0.0, 5.0).drift.last_rise_at, Some(rise));
         // Race mode never reports one (a lap timer rises every packet).
@@ -781,7 +859,7 @@ mod tests {
             let t = f64::from(i) / 60.0;
             p.timestamp_ms = (t * 1000.0).round() as u32;
             p.current_lap = t as f32;
-            race.on_packet(&p, &cfg, false, t);
+            race.on_packet(&p, &cfg, PauseRule::OFF, t);
         }
         assert_eq!(race.snapshot(live, &cfg, &app, 0.0, 1.0).drift.last_rise_at, None);
     }
