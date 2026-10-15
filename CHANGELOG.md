@@ -4,6 +4,11 @@ All notable user-facing changes, newest first. Categories: **Added** (new
 features), **Fixed** (bug/behaviour fixes), **Removed** (things taken out),
 **Info** (notes worth knowing).
 
+## [0.7.1] – 2026-10-15
+
+### Fixed
+- **In-game HUD overlay on NVIDIA graphics cards**: the HUD (and the overlay test pattern) stayed completely invisible over the game on NVIDIA GPUs, even with monitor and game detection working. It now shows up.
+
 ## [0.7.0] – 2026-10-09
 
 ### Added
