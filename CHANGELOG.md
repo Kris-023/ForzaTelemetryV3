@@ -8,6 +8,7 @@ features), **Fixed** (bug/behaviour fixes), **Removed** (things taken out),
 
 ### Fixed
 - **In-game HUD overlay on NVIDIA graphics cards**: the HUD (and the overlay test pattern) stayed completely invisible over the game on NVIDIA GPUs, even with monitor and game detection working. It now shows up.
+- **Gear in the HUD's Drive cluster sat too high**: with the automatic gearbox on, the gear and its drive-mode letter (e.g. "D9") were drawn too high in the Pill's gear circle on any screen above 1080p or with a HUD scale other than 1. It is centred again.
 
 ## [0.7.0] – 2026-10-09
 
