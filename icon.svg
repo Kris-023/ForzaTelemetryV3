@@ -20,7 +20,7 @@
   <path d="M 364.76 207.29 A 120 120 0 0 1 340.85 342.85" fill="none" stroke="#FF5A1F" stroke-width="32"/>
   <circle cx="340.85" cy="342.85" r="16" fill="#FF5A1F"/>
   <!-- needle -->
-  <path d="M 256 258 L 325.28 218.00" fill="none" stroke="#FF5A1F" stroke-width="32" stroke-linecap="round"/>
+  <path d="M 256 258 L 328.50 224.19" fill="none" stroke="#FF5A1F" stroke-width="32" stroke-linecap="round"/>
   <circle cx="256" cy="258" r="22" fill="#F3F4F6"/>
   </g>
 </svg>
