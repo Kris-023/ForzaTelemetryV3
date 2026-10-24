@@ -13,12 +13,14 @@
   <rect x="34" y="34" width="444" height="444" rx="102" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="4"/>
   <circle cx="256" cy="256" r="190" fill="url(#glow)"/>
   <g transform="translate(0 16)">
-  <!-- tachometer arc: 270 degree sweep, open at the bottom -->
-  <path d="M 171.1 336.9 A 120 120 0 1 1 316.0 148.1" fill="none" stroke="#F3F4F6" stroke-width="32" stroke-linecap="round"/>
-  <!-- redline -->
-  <path d="M 316.0 148.1 A 120 120 0 0 1 340.9 336.9" fill="none" stroke="#FF5A1F" stroke-width="32" stroke-linecap="round"/>
+  <!-- tachometer: centre (256,258) r=120, 270 deg sweep -135..+135 from top; white -135..65 -->
+  <path d="M 171.15 342.85 A 120 120 0 1 1 364.76 207.29" fill="none" stroke="#F3F4F6" stroke-width="32"/>
+  <circle cx="171.15" cy="342.85" r="16" fill="#F3F4F6"/>
+  <!-- redline: same circle, butt-joined at 65 deg; circles are the round end caps -->
+  <path d="M 364.76 207.29 A 120 120 0 0 1 340.85 342.85" fill="none" stroke="#FF5A1F" stroke-width="32"/>
+  <circle cx="340.85" cy="342.85" r="16" fill="#FF5A1F"/>
   <!-- needle -->
-  <path d="M 256 246 L 289.0 188.8" fill="none" stroke="#FF5A1F" stroke-width="32" stroke-linecap="round"/>
-  <circle cx="256" cy="246" r="22" fill="#F3F4F6"/>
+  <path d="M 256 258 L 325.28 218.00" fill="none" stroke="#FF5A1F" stroke-width="32" stroke-linecap="round"/>
+  <circle cx="256" cy="258" r="22" fill="#F3F4F6"/>
   </g>
 </svg>
