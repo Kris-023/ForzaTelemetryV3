@@ -1,4 +1,4 @@
 /target
 /raw_assets
-Cargo.lock
 .claude/
+/build/

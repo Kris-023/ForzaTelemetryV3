@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Forza Telemetry V3
+Comment=Live dashboard for Forza Horizon 6 telemetry
+Exec=ForzaTelemetryV3
+Icon=ForzaTelemetryV3
+Categories=Game;Utility;
