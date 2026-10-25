@@ -80,6 +80,14 @@ from, and how much power it makes. Search and browse.
 It downloads the app for you and **keeps it up to date automatically** — one click and
 you're always on the latest version.
 
+**Linux**: run `ritz-get install ForzaTelemetryV3` (or, without ritz-get, clone this repo and
+run `./install.sh --install`; `./install.sh --remove` uninstalls it again), then start
+`ForzaTelemetryV3`. The [Launcher](https://github.com/Ritze03/ForzaTelemetryV3Launcher)
+(`ForzaTelemetryV3Launcher`) is the alternative that builds and updates the app for you.
+Global hotkeys, the automatic gearbox and backfire read and send key presses through
+`/dev/input`, so add yourself to the `input` group once (`sudo usermod -aG input $USER`,
+then log in again).
+
 Then, to feed it data:
 
 1. In Forza Horizon 6, open **Settings → HUD and Gameplay → Data Out**.
